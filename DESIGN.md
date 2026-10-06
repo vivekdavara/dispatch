@@ -25,7 +25,7 @@ pricing, and customer-facing tracking.
 | **Zone** | A service area: a centre point and a radius (e.g. "Boston Back Bay", 3 km). Orders and couriers belong to one zone; matching never crosses zones. | Postgres `zones` |
 | **Courier** | A person who delivers. Has a status: `OFFLINE`, `AVAILABLE`, `OFFERED` (an offer is pending), `BUSY` (carrying an order). | Postgres `couriers` (record), Redis (live position) |
 | **Order** | A pickup and drop-off location, a tier (`STANDARD` or `PRIORITY`), and a status: `PENDING` → `OFFERED` → `ASSIGNED` → `PICKED_UP` → `DELIVERED`, or `CANCELLED`. | Postgres `orders` |
-| **Assignment** | One offer of one order to one courier, with its outcome: `OFFERED` → `ACCEPTED`, `DECLINED` or `EXPIRED`. An order can have many assignments over its life (one per attempt) but only one active one. | Postgres `assignments` |
+| **Assignment** | One offer of one order to one courier, with its outcome: `OFFERED` → `ACCEPTED`, `DECLINED` or `EXPIRED`, and an accepted one ends `COMPLETED` (delivered) or `CANCELLED`. An order can have many assignments over its life (one per attempt) but only one active one. | Postgres `assignments` |
 
 ### State machines
 
@@ -134,7 +134,8 @@ same key returns the existing order (and a request with the same key but a diffe
 
 - `zones(id, name, center_lat, center_lng, radius_km)`
 - `couriers(id, zone_id, name, status, idle_since, last_seen_at, created_at, updated_at)`
-- `orders(id, idempotency_key UNIQUE, zone_id, pickup/dropoff lat-lng, tier, status, created_at, updated_at)`
+- `orders(id, idempotency_key UNIQUE, request_hash, zone_id, pickup/dropoff lat-lng, tier, status, created_at,
+  updated_at)`, with a partial index on pending orders per zone
 - `assignments(id, order_id, courier_id, status, distance_m, offered_at, responded_at)` with the two partial unique
   indexes above.
 
