@@ -72,8 +72,10 @@ For the chosen order, candidates are couriers that are `AVAILABLE`, in the order
 in the last 60 seconds, and are within `maxPickupKm` (default 5 km) of the pickup point. Among candidates:
 
 1. **Nearest first**, by great-circle (haversine) distance from the courier to the pickup.
-2. Distances within **50 m** of each other count as a tie (GPS noise is larger than that). A tie goes to the courier
-   who has been **idle longest**, which spreads work fairly.
+2. Couriers within **50 m** of the nearest one count as tied with it (GPS noise is larger than that). The tie goes
+   to the courier who has been **idle longest**, which spreads work fairly. Couriers past that window start the
+   next band, anchored at the nearest of them, and so on; the full ranking is the fallback list if the winner is
+   claimed by another order first.
 3. A remaining tie goes to the smaller courier id.
 
 If there's no candidate, the order stays `PENDING` and is retried when a courier becomes available or moves.
