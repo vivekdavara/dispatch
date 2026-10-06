@@ -12,6 +12,12 @@ spring:
     password: ""
   flyway:
     locations: classpath:db/migration
+  # Project-local Redis (redis-server --port 6381); live courier positions only, never the source of truth.
+  data:
+    redis:
+      host: localhost
+      port: 6381
+      timeout: 500ms
 
 management:
   endpoints:
