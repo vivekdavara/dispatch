@@ -28,6 +28,13 @@ public class ApiErrors {
         }
     }
 
+    /** Well-formed, but the domain refuses it (e.g. a courier setting a status only the engine sets). */
+    public static class UnprocessableException extends RuntimeException {
+        public UnprocessableException(String message) {
+            super(message);
+        }
+    }
+
     @ExceptionHandler(NotFoundException.class)
     ProblemDetail notFound(NotFoundException e) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, e.getMessage());
@@ -38,7 +45,7 @@ public class ApiErrors {
         return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, e.getMessage());
     }
 
-    @ExceptionHandler({UnknownZoneException.class, OrderService.PickupOutsideZoneException.class})
+    @ExceptionHandler({UnprocessableException.class, UnknownZoneException.class, OrderService.PickupOutsideZoneException.class})
     ProblemDetail unprocessable(RuntimeException e) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_ENTITY, e.getMessage());
     }
