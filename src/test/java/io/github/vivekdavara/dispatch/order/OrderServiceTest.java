@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.vivekdavara.dispatch.domain.OrderTier;
 import io.github.vivekdavara.dispatch.order.CreateOrderRequest.Location;
+import io.github.vivekdavara.dispatch.zone.UnknownZoneException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -70,7 +71,7 @@ class OrderServiceTest {
     @Test
     void unknownZoneIsRejected() {
         var r = new CreateOrderRequest("nowhere", new Location(42.35, -71.08), new Location(42.36, -71.06), null);
-        assertThatThrownBy(() -> service.create("k1", r)).isInstanceOf(OrderService.UnknownZoneException.class);
+        assertThatThrownBy(() -> service.create("k1", r)).isInstanceOf(UnknownZoneException.class);
     }
 
     @Test

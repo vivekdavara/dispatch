@@ -1,5 +1,6 @@
 package io.github.vivekdavara.dispatch.order;
 
+import io.github.vivekdavara.dispatch.zone.UnknownZoneException;
 import io.github.vivekdavara.dispatch.zone.Zone;
 import io.github.vivekdavara.dispatch.zone.ZoneRepository;
 import java.time.Clock;
@@ -21,12 +22,6 @@ public class OrderService {
     public static class IdempotencyKeyReusedException extends RuntimeException {
         public IdempotencyKeyReusedException(String key) {
             super("Idempotency-Key '" + key + "' was already used with a different request body");
-        }
-    }
-
-    public static class UnknownZoneException extends RuntimeException {
-        public UnknownZoneException(String zoneId) {
-            super("unknown zone: " + zoneId);
         }
     }
 

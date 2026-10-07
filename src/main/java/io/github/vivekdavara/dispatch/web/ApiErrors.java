@@ -1,6 +1,7 @@
 package io.github.vivekdavara.dispatch.web;
 
 import io.github.vivekdavara.dispatch.order.OrderService;
+import io.github.vivekdavara.dispatch.zone.UnknownZoneException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -37,7 +38,7 @@ public class ApiErrors {
         return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, e.getMessage());
     }
 
-    @ExceptionHandler({OrderService.UnknownZoneException.class, OrderService.PickupOutsideZoneException.class})
+    @ExceptionHandler({UnknownZoneException.class, OrderService.PickupOutsideZoneException.class})
     ProblemDetail unprocessable(RuntimeException e) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_ENTITY, e.getMessage());
     }
