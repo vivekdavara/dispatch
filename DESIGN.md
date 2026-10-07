@@ -106,9 +106,11 @@ flowchart LR
 - **Redis GEO** holds live courier positions: one sorted set per zone (`couriers:geo:{zoneId}`), updated on every
   ping with `GEOADD`, queried with `GEOSEARCH ... BYRADIUS ... ASC`. Pings arrive far more often than orders, so
   they never touch Postgres on the hot path. A per-courier key with a TTL (`courier:seen:{id}`) marks freshness.
-- **Assignment engine** *(D2–D3)*: woken by events (order created, courier became available, offer expired), it
-  takes the zone's top pending order, asks Redis for nearby couriers, ranks them with `CourierRanking`, and claims
-  the winner in one Postgres transaction.
+- **Assignment engine** (`AssignmentEngine`, D2): one *pass* over a zone takes its pending orders highest
+  priority first; for each, it asks Redis for couriers with a fresh ping near the pickup, keeps the ones Postgres
+  says are `AVAILABLE`, ranks them with `CourierRanking`, and claims the winner in one Postgres transaction. Today
+  a pass runs on `POST /api/v1/zones/{id}/dispatch`; from D3, events (order created, courier became available,
+  offer expired) trigger passes.
 - **WebSocket hub** *(D3)*: pushes offers to the courier's open connection and receives accept/decline.
 
 ### Concurrency: how double-assignment is prevented
@@ -125,10 +127,57 @@ The database enforces it, not application code alone:
 So two engine threads racing for the same courier can't both win, and a bug in the engine fails loudly with a
 constraint violation instead of silently double-assigning.
 
-### Idempotent order creation *(D2)*
+### One engine pass, step by step
 
-`POST /api/v1/orders` requires an `Idempotency-Key` header. `orders.idempotency_key` is unique; a retry with the
-same key returns the existing order (and a request with the same key but a different body is rejected with 409).
+1. **Load the batch.** Up to `pending-batch` (200) of the zone's `PENDING` orders, ordered in SQL by
+   `created_at - tierBonus`. That's the same order as the priority score (score = bonus + time waited, so a
+   larger score means an earlier "effective" creation time), which means the batch can't leave out a newer
+   priority order that outranks older standard ones. The engine then re-sorts with `PriorityScore` itself so the
+   rule has one definition.
+2. **For each order, find candidates.** `GEOSEARCH couriers:geo:{zone} FROMLONLAT … BYRADIUS 5 km ASC`, then one
+   `MGET` of the `courier:seen:{id}` markers to drop stale couriers (and remove them from the GEO set), then one
+   `SELECT … WHERE status = 'AVAILABLE' AND id = ANY(?)` for status and `idle_since`.
+3. **Rank** with `CourierRanking` (nearest, 50 m bands, longest idle, id).
+4. **Claim**, in one transaction:
+   `UPDATE orders SET status='OFFERED' WHERE id=? AND status='PENDING'` (zero rows: another pass took the order,
+   skip it); then down the ranking, `UPDATE couriers SET status='OFFERED' WHERE id=? AND status='AVAILABLE'` until
+   one succeeds; then `INSERT INTO assignments`. If every ranked courier was taken meanwhile, roll back, and the
+   order stays `PENDING`.
+
+Why this can't deadlock: a claim holds one order row and waits on a courier row only while it holds no courier;
+the transaction holding that courier has already finished claiming and doesn't wait on anything. Why it can't
+double-assign: both updates are compare-and-sets, and the partial unique indexes back them up.
+`ConcurrentDispatchTest` runs eight passes over the same zone at once to check exactly that.
+
+### Idempotent order creation
+
+`POST /api/v1/orders` requires an `Idempotency-Key` header (1–255 printable ASCII characters).
+`orders.idempotency_key` is unique, and `orders.request_hash` stores a SHA-256 of a canonical form of the request
+(zone, coordinates, tier with the default filled in), so formatting differences don't matter.
+
+| Situation | Response |
+|---|---|
+| New key | `201 Created`, `Location`, `Idempotent-Replayed: false` |
+| Same key, same request | `200 OK` with the original order, `Idempotent-Replayed: true` |
+| Same key, different request | `409 Conflict` |
+| Unknown zone, or pickup outside the zone's radius | `422 Unprocessable Entity` |
+| Missing/invalid key, invalid body | `400 Bad Request` |
+
+The insert is `INSERT … ON CONFLICT (idempotency_key) DO NOTHING RETURNING …`. If it returns no row, a concurrent
+request with the same key won the race; the service reads the winner and replays it (or returns 409 if the bodies
+differ). So simultaneous retries never surface a unique-violation error. Errors are RFC 9457
+`application/problem+json`.
+
+### Couriers: status and location
+
+- Couriers set only `AVAILABLE` and `OFFLINE` themselves (`PUT /couriers/{id}/status`); `OFFERED` and `BUSY` are
+  set by the engine (and D3's accept flow). Repeating the current status is a no-op; an `OFFERED` or `BUSY` courier
+  can't go offline (409). Each change is a compare-and-set, retried on a lost race. Becoming `AVAILABLE` stamps
+  `idle_since`; going `OFFLINE` deletes the Redis position.
+- A location ping (`PUT /couriers/{id}/location`) is one pipelined Redis round trip: `GEOADD` plus
+  `SET courier:seen:{id} … EX 60`. The courier's zone (needed for the key) is cached in memory after the first
+  lookup, since a courier's zone never changes, so steady-state pings don't touch Postgres. `couriers.last_seen_at`
+  is therefore not updated per ping; Redis is where freshness lives.
 
 ## Schema (Flyway `V1__init.sql`)
 
@@ -146,8 +195,11 @@ Check constraints keep coordinates in range and statuses to the known values.
 | Method | Path | Milestone |
 |---|---|---|
 | GET | `/api/v1/health` (and `/actuator/health`) | D1 |
+| PUT, GET | `/api/v1/zones/{id}` | D2 |
+| POST | `/api/v1/zones/{id}/dispatch` (run one engine pass now) | D2 |
 | POST | `/api/v1/orders` (Idempotency-Key header) | D2 |
 | GET | `/api/v1/orders/{id}` | D2 |
+| POST | `/api/v1/couriers` (register), GET `/api/v1/couriers/{id}` | D2 |
 | PUT | `/api/v1/couriers/{id}/location` | D2 |
 | PUT | `/api/v1/couriers/{id}/status` | D2 |
 | WS | `/ws/couriers/{id}` (offers, accept, decline) | D3 |
@@ -156,8 +208,8 @@ Check constraints keep coordinates in range and statuses to the known values.
 
 - **Offer timeout:** an offer not answered in 30 s expires; the order goes back to `PENDING` and the courier back
   to `AVAILABLE` (and is skipped for that order).
-- **Courier disconnect:** a courier whose location goes stale (no ping for 60 s) drops out of candidates; a pending
-  offer to a disconnected courier expires normally.
+- **Courier disconnect:** a courier whose location goes stale (no ping for 60 s) drops out of candidates (built in
+  D2: the `courier:seen` TTL); a pending offer to a disconnected courier expires normally.
 - **Redis loss:** positions are soft state. Couriers resend location every few seconds, so Redis refills itself.
 
 ## Measurement plan *(D4)*
