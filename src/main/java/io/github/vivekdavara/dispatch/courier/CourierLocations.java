@@ -47,11 +47,11 @@ public class CourierLocations {
         this.freshFor = props.locations().freshFor();
     }
 
-    static String geoKey(String zoneId) {
+    public static String geoKey(String zoneId) {
         return "couriers:geo:" + zoneId;
     }
 
-    static String seenKey(UUID courierId) {
+    public static String seenKey(UUID courierId) {
         return "courier:seen:" + courierId;
     }
 
