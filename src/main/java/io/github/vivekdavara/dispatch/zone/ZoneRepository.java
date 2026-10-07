@@ -21,6 +21,17 @@ public class ZoneRepository {
         this.jdbc = jdbc;
     }
 
+    /** Creates the zone or replaces its name, centre and radius. */
+    public Zone upsert(Zone z) {
+        jdbc.update("""
+                INSERT INTO zones (id, name, center_lat, center_lng, radius_km) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (id) DO UPDATE
+                   SET name = excluded.name, center_lat = excluded.center_lat,
+                       center_lng = excluded.center_lng, radius_km = excluded.radius_km""",
+                z.id(), z.name(), z.center().lat(), z.center().lng(), z.radiusKm());
+        return z;
+    }
+
     public Optional<Zone> find(String id) {
         return jdbc.query("SELECT id, name, center_lat, center_lng, radius_km FROM zones WHERE id = ?", ROW, id)
                 .stream().findFirst();
