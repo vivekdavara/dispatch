@@ -4,6 +4,10 @@ server:
 spring:
   application:
     name: dispatch
+  # Errors (ours and Spring's: validation, bad JSON, missing headers) as RFC 9457 application/problem+json.
+  mvc:
+    problemdetails:
+      enabled: true
   # Local default: the Homebrew Postgres 14 on 5432 with the OS user. CI overrides these through
   # SPRING_DATASOURCE_URL / _USERNAME / _PASSWORD.
   datasource:
