@@ -1,0 +1,7 @@
+# Test-only overrides. Spring Boot reads classpath:/config/application.yml after classpath:/application.yml, so
+# these win over the main file without replacing it.
+dispatch:
+  loop:
+    # Most tests drive the engine by hand and assert exact outcomes; a background pass would race them.
+    # DispatchLoopTest turns the loop back on in its own context.
+    enabled: false

@@ -7,7 +7,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 /** Tunables under {@code dispatch.*} in application.yml. */
 @ConfigurationProperties("dispatch")
 public record DispatchProperties(@DefaultValue Locations locations, @DefaultValue Assignment assignment,
-                                 @DefaultValue Offers offers) {
+                                 @DefaultValue Offers offers, @DefaultValue Loop loop) {
 
     /**
      * @param freshFor how long a location ping keeps a courier eligible; a courier with no ping for longer is
@@ -27,5 +27,17 @@ public record DispatchProperties(@DefaultValue Locations locations, @DefaultValu
      * @param timeout how long a courier has to answer an offer before it expires and the order is re-offered
      */
     public record Offers(@DefaultValue("30s") Duration timeout) {
+    }
+
+    /**
+     * The event-driven loop ({@code DispatchLoop}). The intervals are read by its {@code @Scheduled} methods.
+     *
+     * @param enabled        false turns the loop off entirely (passes then run only on the manual endpoint)
+     * @param threads        passes over different zones run in parallel on this many threads
+     * @param expiryInterval how often overdue offers are expired
+     * @param sweepInterval  how often zones with pending orders get a pass even without an event
+     */
+    public record Loop(@DefaultValue("true") boolean enabled, @DefaultValue("4") int threads,
+                       @DefaultValue("1s") Duration expiryInterval, @DefaultValue("5s") Duration sweepInterval) {
     }
 }

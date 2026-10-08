@@ -1,5 +1,6 @@
 package io.github.vivekdavara.dispatch.courier;
 
+import io.github.vivekdavara.dispatch.assignment.DispatchNeeded;
 import io.github.vivekdavara.dispatch.domain.GeoPoint;
 import io.github.vivekdavara.dispatch.web.ApiErrors;
 import io.github.vivekdavara.dispatch.zone.UnknownZoneException;
@@ -9,6 +10,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -21,6 +23,7 @@ public class CourierService {
     private final CourierLocations locations;
     private final ZoneRepository zones;
     private final Clock clock;
+    private final ApplicationEventPublisher events;
 
     /**
      * Courier id to zone id. A courier's zone never changes, so after the first ping a location update is Redis
@@ -29,11 +32,12 @@ public class CourierService {
     private final Map<UUID, String> zoneOf = new ConcurrentHashMap<>();
 
     public CourierService(CourierRepository couriers, CourierLocations locations, ZoneRepository zones,
-                          Clock clock) {
+                          Clock clock, ApplicationEventPublisher events) {
         this.couriers = couriers;
         this.locations = locations;
         this.zones = zones;
         this.clock = clock;
+        this.events = events;
     }
 
     public Courier register(String zoneId, String name) {
@@ -77,6 +81,8 @@ public class CourierService {
             if (couriers.transition(courierId, current.status(), target, clock.instant())) {
                 if (target == CourierStatus.OFFLINE) {
                     locations.remove(current.zoneId(), courierId);
+                } else {
+                    events.publishEvent(new DispatchNeeded(current.zoneId(), DispatchNeeded.Reason.COURIER_AVAILABLE));
                 }
                 return couriers.find(courierId).orElseThrow();
             }

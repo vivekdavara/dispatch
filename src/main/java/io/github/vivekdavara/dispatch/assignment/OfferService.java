@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -40,14 +41,16 @@ public class OfferService {
     private final TransactionTemplate tx;
     private final Clock clock;
     private final Duration timeout;
+    private final ApplicationEventPublisher events;
 
     public OfferService(AssignmentRepository assignments, CourierRepository couriers, TransactionTemplate tx,
-                        Clock clock, DispatchProperties props) {
+                        Clock clock, DispatchProperties props, ApplicationEventPublisher events) {
         this.assignments = assignments;
         this.couriers = couriers;
         this.tx = tx;
         this.clock = clock;
         this.timeout = props.offers().timeout();
+        this.events = events;
     }
 
     /** When an offer made at {@code offeredAt} stops being answerable. */
@@ -85,7 +88,7 @@ public class OfferService {
     /** The courier handed the order over: the assignment completes and the courier is free for the next one. */
     public Assignment delivered(long assignmentId, UUID courierId) {
         Instant now = clock.instant();
-        return tx.execute(status -> {
+        Assignment done = tx.execute(status -> {
             Assignment a = assignments.transition(assignmentId, courierId, AssignmentStatus.ACCEPTED,
                             AssignmentStatus.COMPLETED, now)
                     .orElseThrow(() -> refusal(assignmentId, courierId, "deliver"));
@@ -96,6 +99,8 @@ public class OfferService {
             follow(couriers.transition(courierId, CourierStatus.BUSY, CourierStatus.AVAILABLE, now), a, "courier");
             return a;
         });
+        events.publishEvent(new DispatchNeeded(done.zoneId(), DispatchNeeded.Reason.DELIVERED));
+        return done;
     }
 
     /** This courier's accepted assignment, or the reason it isn't one. */
@@ -129,7 +134,7 @@ public class OfferService {
      * turning work down. Empty if the offer was no longer OFFERED (someone else answered first).
      */
     Optional<Assignment> release(long assignmentId, UUID courierId, AssignmentStatus outcome, Instant now) {
-        return tx.execute(status -> {
+        Optional<Assignment> released = tx.execute(status -> {
             var a = assignments.transition(assignmentId, courierId, AssignmentStatus.OFFERED, outcome, now);
             a.ifPresent(won -> {
                 follow(assignments.moveOrder(won.orderId(), OrderStatus.OFFERED, OrderStatus.PENDING, now), won,
@@ -139,6 +144,11 @@ public class OfferService {
             });
             return a;
         });
+        // After the commit, so the pass this triggers sees the order PENDING and the courier AVAILABLE.
+        released.ifPresent(a -> events.publishEvent(new DispatchNeeded(a.zoneId(),
+                outcome == AssignmentStatus.EXPIRED ? DispatchNeeded.Reason.OFFER_EXPIRED
+                        : DispatchNeeded.Reason.OFFER_DECLINED)));
+        return released;
     }
 
     /** Why an answer was refused: 404 if it isn't this courier's offer, 409 if it was already settled. */

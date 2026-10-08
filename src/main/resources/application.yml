@@ -44,3 +44,13 @@ dispatch:
     # An offer not accepted or declined within this long expires: the order goes back to PENDING for another
     # courier, and this courier is never offered that order again.
     timeout: 30s
+  loop:
+    # Event-driven passes: order created, courier available, offer declined/expired, delivery done.
+    enabled: true
+    # Passes over different zones run in parallel; one zone never has two at once.
+    threads: 4
+    # How often overdue offers are expired (each expiry triggers a pass for its zone).
+    expiry-interval: 1s
+    # Safety net: zones with pending orders get a pass this often even without an event (a courier driving into
+    # range sends only location pings, which don't trigger passes).
+    sweep-interval: 5s

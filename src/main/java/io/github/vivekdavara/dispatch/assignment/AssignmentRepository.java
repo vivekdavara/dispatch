@@ -22,7 +22,9 @@ public class AssignmentRepository {
     public record PendingOrder(UUID id, OrderTier tier, Instant createdAt, GeoPoint pickup) {
     }
 
-    static final String COLUMNS = "id, order_id, courier_id, status, distance_m, offered_at, responded_at";
+    /** Works in a SELECT from assignments and in an UPDATE's RETURNING; the zone comes from the order. */
+    static final String COLUMNS = "id, order_id, courier_id, (SELECT o.zone_id FROM orders o WHERE o.id = order_id)"
+            + " AS zone_id, status, distance_m, offered_at, responded_at";
 
     static final RowMapper<Assignment> ROW = (rs, n) -> {
         Timestamp responded = rs.getTimestamp("responded_at");
@@ -30,6 +32,7 @@ public class AssignmentRepository {
                 rs.getLong("id"),
                 rs.getObject("order_id", UUID.class),
                 rs.getObject("courier_id", UUID.class),
+                rs.getString("zone_id"),
                 AssignmentStatus.valueOf(rs.getString("status")),
                 rs.getDouble("distance_m"),
                 rs.getTimestamp("offered_at").toInstant(),

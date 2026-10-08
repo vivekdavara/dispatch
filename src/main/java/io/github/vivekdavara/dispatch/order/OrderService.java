@@ -1,11 +1,13 @@
 package io.github.vivekdavara.dispatch.order;
 
+import io.github.vivekdavara.dispatch.assignment.DispatchNeeded;
 import io.github.vivekdavara.dispatch.zone.UnknownZoneException;
 import io.github.vivekdavara.dispatch.zone.Zone;
 import io.github.vivekdavara.dispatch.zone.ZoneRepository;
 import java.time.Clock;
 import java.util.Optional;
 import java.util.UUID;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 
 /**
@@ -34,11 +36,13 @@ public class OrderService {
     private final OrderRepository orders;
     private final ZoneRepository zones;
     private final Clock clock;
+    private final ApplicationEventPublisher events;
 
-    public OrderService(OrderRepository orders, ZoneRepository zones, Clock clock) {
+    public OrderService(OrderRepository orders, ZoneRepository zones, Clock clock, ApplicationEventPublisher events) {
         this.orders = orders;
         this.zones = zones;
         this.clock = clock;
+        this.events = events;
     }
 
     public Created create(String idempotencyKey, CreateOrderRequest request) {
@@ -58,6 +62,9 @@ public class OrderService {
         Optional<Order> inserted = orders.insertIfAbsent(UUID.randomUUID(), idempotencyKey, hash, request,
                 clock.instant());
         if (inserted.isPresent()) {
+            // The insert has committed (no surrounding transaction), so a pass can see the order. Replays don't
+            // publish: the original request already did.
+            events.publishEvent(new DispatchNeeded(zone.id(), DispatchNeeded.Reason.ORDER_CREATED));
             return new Created(inserted.get(), false);
         }
         // A concurrent request with the same key committed between our lookup and our insert.
