@@ -26,6 +26,9 @@ import org.springframework.transaction.support.TransactionTemplate;
  *       that order to that courier again.</li>
  *   <li>expiry ({@link #expireDue}): the same as a decline, for offers nobody answered within the timeout.</li>
  * </ul>
+ *
+ * After an accept, the same courier reports {@link #pickedUp} (order PICKED_UP) and {@link #delivered}
+ * (assignment COMPLETED, order DELIVERED, courier AVAILABLE again).
  */
 @Service
 public class OfferService {
@@ -67,6 +70,39 @@ public class OfferService {
     public Assignment decline(long assignmentId, UUID courierId) {
         return release(assignmentId, courierId, AssignmentStatus.DECLINED, clock.instant())
                 .orElseThrow(() -> refusal(assignmentId, courierId, "decline"));
+    }
+
+    /** The courier collected the order: ASSIGNED to PICKED_UP. */
+    public Assignment pickedUp(long assignmentId, UUID courierId) {
+        Instant now = clock.instant();
+        Assignment a = acceptedBy(assignmentId, courierId, "pick up");
+        if (!assignments.moveOrder(a.orderId(), OrderStatus.ASSIGNED, OrderStatus.PICKED_UP, now)) {
+            throw new ApiErrors.ConflictException("order " + a.orderId() + " was already picked up");
+        }
+        return a;
+    }
+
+    /** The courier handed the order over: the assignment completes and the courier is free for the next one. */
+    public Assignment delivered(long assignmentId, UUID courierId) {
+        Instant now = clock.instant();
+        return tx.execute(status -> {
+            Assignment a = assignments.transition(assignmentId, courierId, AssignmentStatus.ACCEPTED,
+                            AssignmentStatus.COMPLETED, now)
+                    .orElseThrow(() -> refusal(assignmentId, courierId, "deliver"));
+            if (!assignments.moveOrder(a.orderId(), OrderStatus.PICKED_UP, OrderStatus.DELIVERED, now)) {
+                // Rolls the assignment back to ACCEPTED too.
+                throw new ApiErrors.ConflictException("order " + a.orderId() + " has to be picked up first");
+            }
+            follow(couriers.transition(courierId, CourierStatus.BUSY, CourierStatus.AVAILABLE, now), a, "courier");
+            return a;
+        });
+    }
+
+    /** This courier's accepted assignment, or the reason it isn't one. */
+    private Assignment acceptedBy(long assignmentId, UUID courierId, String verb) {
+        return assignments.find(assignmentId)
+                .filter(a -> a.courierId().equals(courierId) && a.status() == AssignmentStatus.ACCEPTED)
+                .orElseThrow(() -> refusal(assignmentId, courierId, verb));
     }
 
     /**
