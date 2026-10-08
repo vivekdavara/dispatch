@@ -2,13 +2,16 @@ package io.github.vivekdavara.dispatch.assignment;
 
 import io.github.vivekdavara.dispatch.domain.GeoPoint;
 import io.github.vivekdavara.dispatch.domain.OrderTier;
+import io.github.vivekdavara.dispatch.order.OrderStatus;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
 /** The engine's reads and writes. Every state change is a compare-and-set on the row's current status. */
@@ -18,6 +21,20 @@ public class AssignmentRepository {
     /** The fields of a pending order the engine needs. */
     public record PendingOrder(UUID id, OrderTier tier, Instant createdAt, GeoPoint pickup) {
     }
+
+    static final String COLUMNS = "id, order_id, courier_id, status, distance_m, offered_at, responded_at";
+
+    static final RowMapper<Assignment> ROW = (rs, n) -> {
+        Timestamp responded = rs.getTimestamp("responded_at");
+        return new Assignment(
+                rs.getLong("id"),
+                rs.getObject("order_id", UUID.class),
+                rs.getObject("courier_id", UUID.class),
+                AssignmentStatus.valueOf(rs.getString("status")),
+                rs.getDouble("distance_m"),
+                rs.getTimestamp("offered_at").toInstant(),
+                responded == null ? null : responded.toInstant());
+    };
 
     private final JdbcTemplate jdbc;
 
@@ -85,5 +102,30 @@ public class AssignmentRepository {
                         VALUES (?, ?, 'OFFERED', ?, ?)
                         RETURNING id""",
                 Long.class, orderId, courierId, distanceMeters, Timestamp.from(now));
+    }
+
+    public Optional<Assignment> find(long id) {
+        return jdbc.query("SELECT " + COLUMNS + " FROM assignments WHERE id = ?", ROW, id).stream().findFirst();
+    }
+
+    /**
+     * Compare-and-set on an assignment: from {@code from} to {@code to}, only if it is still in {@code from} and
+     * belongs to {@code courierId}. Leaving OFFERED stamps {@code responded_at} (the schema requires it).
+     */
+    public Optional<Assignment> transition(long id, UUID courierId, AssignmentStatus from, AssignmentStatus to,
+                                           Instant now) {
+        return jdbc.query("""
+                        UPDATE assignments
+                           SET status = ?,
+                               responded_at = coalesce(responded_at, ?)
+                         WHERE id = ? AND courier_id = ? AND status = ?
+                        """ + "RETURNING " + COLUMNS,
+                ROW, to.name(), Timestamp.from(now), id, courierId, from.name()).stream().findFirst();
+    }
+
+    /** Compare-and-set on an order's status. */
+    public boolean moveOrder(UUID orderId, OrderStatus from, OrderStatus to, Instant now) {
+        return jdbc.update("UPDATE orders SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+                to.name(), Timestamp.from(now), orderId, from.name()) == 1;
     }
 }

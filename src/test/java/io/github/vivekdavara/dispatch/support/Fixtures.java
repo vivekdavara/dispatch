@@ -86,6 +86,15 @@ public final class Fixtures {
         return jdbc.queryForObject("SELECT status FROM couriers WHERE id = ?", String.class, id);
     }
 
+    public String assignmentStatus(long id) {
+        return jdbc.queryForObject("SELECT status FROM assignments WHERE id = ?", String.class, id);
+    }
+
+    public Instant idleSince(UUID courierId) {
+        return jdbc.queryForObject("SELECT idle_since FROM couriers WHERE id = ?", Timestamp.class, courierId)
+                .toInstant();
+    }
+
     public void cleanUp() {
         redis.delete(CourierLocations.geoKey(zone.id()));
         couriers.forEach(c -> redis.delete(CourierLocations.seenKey(c)));
