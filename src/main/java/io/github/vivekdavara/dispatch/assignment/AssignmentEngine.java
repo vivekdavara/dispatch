@@ -67,7 +67,7 @@ public class AssignmentEngine {
         if (nearby.isEmpty()) {
             return Optional.empty();
         }
-        Map<UUID, Instant> idleSince = repo.availableIdleSince(zoneId,
+        Map<UUID, Instant> idleSince = repo.availableIdleSince(zoneId, order.id(),
                 nearby.stream().map(CourierLocations.Nearby::courierId).toList());
         List<CourierRanking.Candidate> candidates = new ArrayList<>();
         for (CourierLocations.Nearby n : nearby) {

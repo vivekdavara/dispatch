@@ -2,6 +2,7 @@ package io.github.vivekdavara.dispatch.assignment;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.groups.Tuple.tuple;
 
 import io.github.vivekdavara.dispatch.courier.CourierLocations;
 import io.github.vivekdavara.dispatch.domain.OrderTier;
@@ -105,6 +106,26 @@ class OfferServiceTest {
         assertThatThrownBy(() -> offers.decline(Long.MAX_VALUE, courier))
                 .isInstanceOf(ApiErrors.NotFoundException.class);
         assertThat(f.assignmentStatus(offer.assignmentId())).isEqualTo("OFFERED");
+    }
+
+    @Test
+    void aCourierWhoDeclinedIsNotOfferedThatOrderAgain() {
+        UUID other = f.availableCourier(Fixtures.north(1_500), MINUTE);
+        offers.decline(offer.assignmentId(), courier);
+
+        // The decliner is still nearest, but the order goes to the next courier.
+        assertThat(engine.dispatchZone(f.zoneId())).extracting(Offer::orderId, Offer::courierId)
+                .containsExactly(tuple(order, other));
+    }
+
+    @Test
+    void aCourierWhoDeclinedOneOrderStillGetsOthers() {
+        offers.decline(offer.assignmentId(), courier);
+        UUID second = f.order(OrderTier.STANDARD, Duration.ZERO);
+
+        assertThat(engine.dispatchZone(f.zoneId())).extracting(Offer::orderId, Offer::courierId)
+                .containsExactly(tuple(second, courier));
+        assertThat(f.orderStatus(order)).isEqualTo("PENDING");
     }
 
     @RepeatedTest(5)

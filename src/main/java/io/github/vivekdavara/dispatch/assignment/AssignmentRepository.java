@@ -64,22 +64,27 @@ public class AssignmentRepository {
     }
 
     /**
-     * Which of {@code courierIds} are AVAILABLE in the zone right now, with when they became idle. A courier
-     * marked AVAILABLE without {@code idle_since} (inserted directly) counts as idle since its last update.
+     * Which of {@code courierIds} can be offered {@code orderId} right now, with when they became idle: AVAILABLE
+     * in the zone, and not one who already declined this order or let an offer of it expire. A courier marked
+     * AVAILABLE without {@code idle_since} (inserted directly) counts as idle since its last update.
      */
-    public Map<UUID, Instant> availableIdleSince(String zoneId, List<UUID> courierIds) {
+    public Map<UUID, Instant> availableIdleSince(String zoneId, UUID orderId, List<UUID> courierIds) {
         Map<UUID, Instant> result = new HashMap<>();
         if (courierIds.isEmpty()) {
             return result;
         }
         jdbc.query("""
-                        SELECT id, coalesce(idle_since, updated_at) AS idle
-                          FROM couriers
-                         WHERE zone_id = ? AND status = 'AVAILABLE' AND id = ANY (?)""",
+                        SELECT c.id, coalesce(c.idle_since, c.updated_at) AS idle
+                          FROM couriers c
+                         WHERE c.zone_id = ? AND c.status = 'AVAILABLE' AND c.id = ANY (?)
+                           AND NOT EXISTS (SELECT 1
+                                             FROM assignments a
+                                            WHERE a.order_id = ? AND a.courier_id = c.id
+                                              AND a.status IN ('DECLINED', 'EXPIRED'))""",
                 rs -> {
                     result.put(rs.getObject("id", UUID.class), rs.getTimestamp("idle").toInstant());
                 },
-                zoneId, courierIds.toArray(UUID[]::new));
+                zoneId, courierIds.toArray(UUID[]::new), orderId);
         return result;
     }
 
