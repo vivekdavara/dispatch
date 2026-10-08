@@ -137,6 +137,12 @@ public class AssignmentRepository {
                 to.name(), Timestamp.from(now), orderId, from.name()) == 1;
     }
 
+    /** The courier's open offer, if any (the partial unique index allows at most one live assignment). */
+    public Optional<Assignment> openOfferFor(UUID courierId) {
+        return jdbc.query("SELECT " + COLUMNS + " FROM assignments WHERE courier_id = ? AND status = 'OFFERED'",
+                ROW, courierId).stream().findFirst();
+    }
+
     /** Up to {@code limit} offers still OFFERED that were made before {@code cutoff}, oldest first. */
     public List<Assignment> offeredBefore(Instant cutoff, int limit) {
         return jdbc.query("SELECT " + COLUMNS + " FROM assignments WHERE status = 'OFFERED' AND offered_at < ?"

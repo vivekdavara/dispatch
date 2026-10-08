@@ -60,7 +60,7 @@ public class OfferService {
 
     public Assignment accept(long assignmentId, UUID courierId) {
         Instant now = clock.instant();
-        return tx.execute(status -> {
+        Assignment accepted = tx.execute(status -> {
             Assignment a = assignments.transition(assignmentId, courierId, AssignmentStatus.OFFERED,
                             AssignmentStatus.ACCEPTED, now)
                     .orElseThrow(() -> refusal(assignmentId, courierId, "accept"));
@@ -68,6 +68,8 @@ public class OfferService {
             follow(couriers.transition(courierId, CourierStatus.OFFERED, CourierStatus.BUSY, now), a, "courier");
             return a;
         });
+        events.publishEvent(new OfferClosed(accepted));
+        return accepted;
     }
 
     public Assignment decline(long assignmentId, UUID courierId) {
@@ -145,9 +147,11 @@ public class OfferService {
             return a;
         });
         // After the commit, so the pass this triggers sees the order PENDING and the courier AVAILABLE.
-        released.ifPresent(a -> events.publishEvent(new DispatchNeeded(a.zoneId(),
-                outcome == AssignmentStatus.EXPIRED ? DispatchNeeded.Reason.OFFER_EXPIRED
-                        : DispatchNeeded.Reason.OFFER_DECLINED)));
+        released.ifPresent(a -> {
+            events.publishEvent(new OfferClosed(a));
+            events.publishEvent(new DispatchNeeded(a.zoneId(), outcome == AssignmentStatus.EXPIRED
+                    ? DispatchNeeded.Reason.OFFER_EXPIRED : DispatchNeeded.Reason.OFFER_DECLINED));
+        });
         return released;
     }
 

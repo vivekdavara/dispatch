@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -24,6 +25,8 @@ import org.springframework.transaction.support.TransactionTemplate;
  * compare-and-set the order PENDING to OFFERED, compare-and-set a courier AVAILABLE to OFFERED (falling back down
  * the ranking if another engine thread got there first), and insert the assignment. Any number of passes can run
  * at once: the compare-and-sets and the partial unique indexes make double assignment impossible.
+ *
+ * <p>Each committed claim is published as an {@link Offer} event; the courier socket pushes it to the courier.
  */
 @Service
 public class AssignmentEngine {
@@ -34,15 +37,17 @@ public class AssignmentEngine {
     private final Clock clock;
     private final double maxPickupMeters;
     private final int pendingBatch;
+    private final ApplicationEventPublisher events;
 
     public AssignmentEngine(AssignmentRepository repo, CourierLocations locations, TransactionTemplate tx,
-                            Clock clock, DispatchProperties props) {
+                            Clock clock, DispatchProperties props, ApplicationEventPublisher events) {
         this.repo = repo;
         this.locations = locations;
         this.tx = tx;
         this.clock = clock;
         this.maxPickupMeters = props.assignment().maxPickupKm() * 1000;
         this.pendingBatch = props.assignment().pendingBatch();
+        this.events = events;
     }
 
     /** One pass over the zone: offers as many pending orders as there are free couriers in range. */
@@ -80,7 +85,9 @@ public class AssignmentEngine {
         if (ranked.isEmpty()) {
             return Optional.empty();
         }
-        return claim(order.id(), ranked, now);
+        Optional<Offer> offer = claim(order.id(), ranked, now);
+        offer.ifPresent(events::publishEvent); // committed by now, so the courier can answer it at once
+        return offer;
     }
 
     private Optional<Offer> claim(UUID orderId, List<CourierRanking.Ranked> ranked, Instant now) {
