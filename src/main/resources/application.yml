@@ -40,3 +40,7 @@ dispatch:
     max-pickup-km: 5.0
     # One engine pass looks at this many of a zone's oldest pending orders and serves them by priority score.
     pending-batch: 200
+  offers:
+    # An offer not accepted or declined within this long expires: the order goes back to PENDING for another
+    # courier, and this courier is never offered that order again.
+    timeout: 30s

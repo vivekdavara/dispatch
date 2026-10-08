@@ -32,11 +32,17 @@ class SchemaTest {
     }
 
     @Test
-    void flywayAppliedV1() {
-        String version = jdbc.queryForObject(
-                "SELECT version FROM flyway_schema_history WHERE success ORDER BY installed_rank DESC LIMIT 1",
-                String.class);
-        assertThat(version).isEqualTo("1");
+    void flywayAppliedEveryMigration() {
+        var versions = jdbc.queryForList(
+                "SELECT version FROM flyway_schema_history WHERE success ORDER BY installed_rank", String.class);
+        assertThat(versions).containsExactly("1", "2");
+    }
+
+    @Test
+    void openOffersHaveAPartialIndexForTheExpirySweep() {
+        String def = jdbc.queryForObject(
+                "SELECT indexdef FROM pg_indexes WHERE indexname = 'assignments_open_offers_idx'", String.class);
+        assertThat(def).contains("(offered_at)").contains("WHERE (status = 'OFFERED'::text)");
     }
 
     @Test

@@ -147,6 +147,70 @@ class OfferServiceTest {
         }
     }
 
+    @Test
+    void anUnansweredOfferExpiresAfterTheTimeout() {
+        backdate(offer.assignmentId(), Duration.ofSeconds(31));
+
+        List<Assignment> expired = offers.expireDue();
+
+        assertThat(expired).extracting(Assignment::id).contains(offer.assignmentId());
+        assertThat(f.assignmentStatus(offer.assignmentId())).isEqualTo("EXPIRED");
+        assertThat(f.orderStatus(order)).isEqualTo("PENDING");
+        assertThat(f.courierStatus(courier)).isEqualTo("AVAILABLE");
+        assertThatThrownBy(() -> offers.accept(offer.assignmentId(), courier))
+                .isInstanceOf(ApiErrors.ConflictException.class).hasMessageContaining("EXPIRED");
+    }
+
+    @Test
+    void aYoungOfferIsLeftAlone() {
+        backdate(offer.assignmentId(), Duration.ofSeconds(25));
+
+        assertThat(offers.expireDue()).extracting(Assignment::id).doesNotContain(offer.assignmentId());
+        assertThat(f.assignmentStatus(offer.assignmentId())).isEqualTo("OFFERED");
+    }
+
+    @Test
+    void anExpiredOrderGoesToTheNextCourier() {
+        UUID other = f.availableCourier(Fixtures.north(2_000), MINUTE);
+        backdate(offer.assignmentId(), Duration.ofMinutes(5));
+        offers.expireDue();
+
+        assertThat(engine.dispatchZone(f.zoneId())).extracting(Offer::orderId, Offer::courierId)
+                .containsExactly(tuple(order, other));
+    }
+
+    @Test
+    void expiresAtIsTheOfferTimePlusTheTimeout() {
+        assertThat(offers.expiresAt(offer.offeredAt())).isEqualTo(offer.offeredAt().plusSeconds(30));
+    }
+
+    @RepeatedTest(5)
+    void acceptRacingExpiryHasExactlyOneWinner() {
+        backdate(offer.assignmentId(), Duration.ofSeconds(31));
+        CountDownLatch start = new CountDownLatch(1);
+        var accept = CompletableFuture.supplyAsync(() -> attempt(start, () -> offers.accept(offer.assignmentId(),
+                courier)));
+        var expire = CompletableFuture.supplyAsync(() -> {
+            try {
+                start.await();
+            } catch (InterruptedException e) {
+                throw new IllegalStateException(e);
+            }
+            return offers.expireDue().stream().anyMatch(a -> a.id() == offer.assignmentId());
+        });
+        start.countDown();
+
+        assertThat(List.of(accept.join(), expire.join())).containsExactlyInAnyOrder(true, false);
+        String expected = accept.join() ? "ACCEPTED" : "EXPIRED";
+        assertThat(f.assignmentStatus(offer.assignmentId())).isEqualTo(expected);
+    }
+
+    /** Pretends the offer was made {@code age} ago. */
+    void backdate(long assignmentId, Duration age) {
+        jdbc.update("UPDATE assignments SET offered_at = now() - ? * interval '1 second' WHERE id = ?",
+                age.toSeconds(), assignmentId);
+    }
+
     static boolean attempt(CountDownLatch start, Runnable answer) {
         try {
             start.await();

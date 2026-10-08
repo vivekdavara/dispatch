@@ -133,4 +133,10 @@ public class AssignmentRepository {
         return jdbc.update("UPDATE orders SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
                 to.name(), Timestamp.from(now), orderId, from.name()) == 1;
     }
+
+    /** Up to {@code limit} offers still OFFERED that were made before {@code cutoff}, oldest first. */
+    public List<Assignment> offeredBefore(Instant cutoff, int limit) {
+        return jdbc.query("SELECT " + COLUMNS + " FROM assignments WHERE status = 'OFFERED' AND offered_at < ?"
+                + " ORDER BY offered_at LIMIT ?", ROW, Timestamp.from(cutoff), limit);
+    }
 }

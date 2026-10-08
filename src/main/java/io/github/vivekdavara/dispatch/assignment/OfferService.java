@@ -1,11 +1,15 @@
 package io.github.vivekdavara.dispatch.assignment;
 
+import io.github.vivekdavara.dispatch.config.DispatchProperties;
 import io.github.vivekdavara.dispatch.courier.CourierRepository;
 import io.github.vivekdavara.dispatch.courier.CourierStatus;
 import io.github.vivekdavara.dispatch.order.OrderStatus;
 import io.github.vivekdavara.dispatch.web.ApiErrors;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
@@ -20,22 +24,32 @@ import org.springframework.transaction.support.TransactionTemplate;
  *   <li>accept: assignment ACCEPTED, order ASSIGNED, courier BUSY.</li>
  *   <li>decline: assignment DECLINED, order back to PENDING, courier back to AVAILABLE. The engine won't offer
  *       that order to that courier again.</li>
+ *   <li>expiry ({@link #expireDue}): the same as a decline, for offers nobody answered within the timeout.</li>
  * </ul>
  */
 @Service
 public class OfferService {
 
+    static final int EXPIRY_BATCH = 500;
+
     private final AssignmentRepository assignments;
     private final CourierRepository couriers;
     private final TransactionTemplate tx;
     private final Clock clock;
+    private final Duration timeout;
 
     public OfferService(AssignmentRepository assignments, CourierRepository couriers, TransactionTemplate tx,
-                        Clock clock) {
+                        Clock clock, DispatchProperties props) {
         this.assignments = assignments;
         this.couriers = couriers;
         this.tx = tx;
         this.clock = clock;
+        this.timeout = props.offers().timeout();
+    }
+
+    /** When an offer made at {@code offeredAt} stops being answerable. */
+    public Instant expiresAt(Instant offeredAt) {
+        return offeredAt.plus(timeout);
     }
 
     public Assignment accept(long assignmentId, UUID courierId) {
@@ -53,6 +67,24 @@ public class OfferService {
     public Assignment decline(long assignmentId, UUID courierId) {
         return release(assignmentId, courierId, AssignmentStatus.DECLINED, clock.instant())
                 .orElseThrow(() -> refusal(assignmentId, courierId, "decline"));
+    }
+
+    /**
+     * Expires every offer older than the timeout, in batches, and returns the ones this call expired. An offer
+     * answered meanwhile is skipped: the assignment compare-and-set lets exactly one of accept, decline and expiry
+     * win.
+     */
+    public List<Assignment> expireDue() {
+        Instant now = clock.instant();
+        List<Assignment> expired = new ArrayList<>();
+        List<Assignment> due;
+        do {
+            due = assignments.offeredBefore(now.minus(timeout), EXPIRY_BATCH);
+            for (Assignment a : due) {
+                release(a.id(), a.courierId(), AssignmentStatus.EXPIRED, now).ifPresent(expired::add);
+            }
+        } while (due.size() == EXPIRY_BATCH);
+        return expired;
     }
 
     /**
