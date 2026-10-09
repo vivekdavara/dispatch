@@ -102,12 +102,17 @@ public class AssignmentEngine {
         if (ranked.isEmpty()) {
             return Optional.empty();
         }
-        Optional<Offer> offer = claim(order.id(), ranked, now);
+        Optional<Offer> offer = claim(order.id(), ranked);
         offer.ifPresent(events::publishEvent); // committed by now, so the courier can answer it at once
         return offer;
     }
 
-    private Optional<Offer> claim(UUID orderId, List<CourierRanking.Ranked> ranked, Instant now) {
+    /**
+     * Stamped with the time of the claim, not of the pass: a pass can take a while to reach an order, and the
+     * offer's 30 s answer window (and the measured assignment latency) must start when the courier gets it.
+     */
+    private Optional<Offer> claim(UUID orderId, List<CourierRanking.Ranked> ranked) {
+        Instant now = clock.instant();
         return tx.execute(status -> {
             if (!repo.markOrderOffered(orderId, now)) {
                 return Optional.<Offer>empty(); // another pass took this order
