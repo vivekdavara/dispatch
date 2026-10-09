@@ -4,7 +4,8 @@ Dispatch is a backend that matches delivery orders to couriers in real time. A c
 finds the best available courier nearby, offers the order to that courier over a WebSocket, and reassigns it if the
 courier declines or doesn't answer in time.
 
-This document is the plan the code follows. Sections marked *(D4)* describe parts a later milestone builds.
+This document is the plan the code follows, and since day 4 it describes what's built: the matching rule, the
+engine, offers over WebSockets, failure handling, and the load simulator that measures it.
 
 ## Goals and non-goals
 
@@ -135,20 +136,46 @@ constraint violation instead of silently double-assigning.
 
 ### One engine pass, step by step
 
-1. **Load the batch.** Up to `pending-batch` (200) of the zone's `PENDING` orders, ordered in SQL by
-   `created_at - tierBonus`. That's the same order as the priority score (score = bonus + time waited, so a
-   larger score means an earlier "effective" creation time), which means the batch can't leave out a newer
-   priority order that outranks older standard ones. The engine then re-sorts with `PriorityScore` itself so the
-   rule has one definition.
-2. **For each order, find candidates.** `GEOSEARCH couriers:geo:{zone} FROMLONLAT … BYRADIUS 5 km ASC`, then one
-   `MGET` of the `courier:seen:{id}` markers to drop stale couriers (and remove them from the GEO set), then one
-   `SELECT … WHERE status = 'AVAILABLE' AND id = ANY(?)` for status and `idle_since`.
-3. **Rank** with `CourierRanking` (nearest, 50 m bands, longest idle, id).
-4. **Claim**, in one transaction:
+1. **Snapshot the free couriers.** One `SELECT id, idle_since FROM couriers WHERE zone_id = ? AND status =
+   'AVAILABLE'`. If it's empty the pass ends here: nobody can be offered anything.
+2. **Load the batch.** Up to `pending-batch` (200) of the zone's `PENDING` orders, ordered in SQL by
+   `created_at - tierBonus`, each with the couriers who refused it (an `ARRAY(…)` subquery over its `DECLINED` and
+   `EXPIRED` assignments). Ordering by `created_at - tierBonus` is the same order as the priority score (score =
+   bonus + time waited, so a larger score means an earlier "effective" creation time), which means the batch can't
+   leave out a newer priority order that outranks older standard ones. The engine then re-sorts with
+   `PriorityScore` itself so the rule has one definition.
+3. **For each order, find candidates.** `GEOSEARCH couriers:geo:{zone} FROMLONLAT … BYRADIUS 5 km ASC`, then one
+   `MGET` of the `courier:seen:{id}` markers to drop stale couriers (and remove them from the GEO set); keep the
+   ones in the snapshot that haven't refused this order. No Postgres round trip.
+4. **Rank** with `CourierRanking` (nearest, 50 m bands, longest idle, id).
+5. **Claim**, in one transaction:
    `UPDATE orders SET status='OFFERED' WHERE id=? AND status='PENDING'` (zero rows: another pass took the order,
    skip it); then down the ranking, `UPDATE couriers SET status='OFFERED' WHERE id=? AND status='AVAILABLE'` until
-   one succeeds; then `INSERT INTO assignments`. If every ranked courier was taken meanwhile, roll back, and the
-   order stays `PENDING`.
+   one succeeds; then `INSERT INTO assignments`, stamped with the claim time (not the pass's start, which would
+   shorten the courier's answer window by however long the pass took to get here). If every ranked courier was
+   taken meanwhile, roll back, and the order stays `PENDING`. A claimed courier leaves the snapshot, and **when the
+   snapshot is empty the pass stops**: the rest of the backlog can't be served until a courier frees up, and that
+   courier's event starts the next pass.
+
+The snapshot can go stale during a pass (a courier goes offline, or the manual endpoint runs a pass alongside).
+That's safe: the claim is still a compare-and-set, so a stale entry costs one `UPDATE` that matches nothing and a
+fall back down the ranking, never a wrong offer.
+
+**Why a snapshot (day 4).** The day-2 pass asked Postgres once *per pending order* which nearby couriers were
+`AVAILABLE`, and walked the whole batch even when every courier was busy. In a rush that's exactly when the batch
+is full: 200 orders × (GEOSEARCH + MGET + SELECT) per pass, nearly all of it finding nobody. The original pass is
+still there behind `dispatch.assignment.candidate-snapshot=false`; `CandidateSnapshotTest` builds identical zones
+from eight seeds and checks both passes make exactly the same offers, and the README has both measured.
+
+**What the measurement turned up.** On a static zone the two passes agree exactly, but under load they don't, and
+the snapshot pass is the one that follows the rule. The per-order pass looked couriers up live, so a courier who
+came free while a 200-order pass was on its 150th order went to the 150th order, ahead of the 149 that outranked
+it. The snapshot pass can't see a courier freed mid-pass; that courier's event starts the next pass, which serves
+the queue from the top. The simulator counts *priority inversions* (pairs in one zone where order A outranked B and
+was already waiting when B got its first offer, yet A's came later): in the second round of runs, 177,205 pairs with
+the per-order pass vs 56 with the snapshot pass in the standard scenario, and 522,301 vs 82 in the overload one. The visible effect is a much shorter tail (the oldest orders stop waiting minutes) and, in overload, a
+higher median: strict priority order behaves like first come, first served, and the old effectively random order
+let some new orders jump the queue.
 
 Why this can't deadlock: a claim holds one order row and waits on a courier row only while it holds no courier;
 the transaction holding that courier has already finished claiming and doesn't wait on anything. Why it can't
@@ -176,6 +203,11 @@ rows disagreeing.
 - Answering another courier's assignment is a 404 (it doesn't say the assignment exists); answering one that is
   already settled is a 409 that names its status. Delivering before pickup is a 409 and rolls the whole delivery
   back.
+- **Answers are idempotent per courier** (day 4). Repeating an accept or a decline that already took effect returns
+  the same assignment (and acks again on the socket, with no second `offer_closed`), because an app whose
+  connection dropped before the acknowledgement can't know whether its answer landed and has to retry. An accept
+  repeated after pickup or delivery still counts as a repeat. A *different* answer to a settled offer is still a
+  409.
 - `OfferServiceTest` races accept against decline and accept against expiry, five times each: always exactly one
   winner, and the order and courier match it.
 
@@ -227,6 +259,14 @@ Plain WebSocket with JSON messages (no STOMP/SockJS: four message types don't ne
 - **The socket is a delivery channel, not the source of truth.** An offer to a courier who isn't connected is
   still a real offer; it expires after 30 s and the order moves on. On connect, the hub sends the courier's open
   offer (if any) right after `hello`, so an app that lost its connection mid-offer can still answer it.
+- **Reconnect grace** (day 4). When a courier's socket closes, they get `dispatch.sockets.reconnect-grace` (10 s) to
+  come back; reconnecting cancels the check. If they don't, they can't be reached, so `OfferService.disconnected`
+  runs one transaction: an offer they hold is released (`EXPIRED`, order back to `PENDING`, re-offered at once
+  rather than after the rest of its 30 s) and the courier goes `OFFERED → OFFLINE` directly, so no pass can offer
+  them something in between; an `AVAILABLE` courier just goes `OFFLINE`; a `BUSY` one is left alone (they're
+  mid-delivery and report pickup and delivery over HTTP). Their Redis position is dropped. The app sets itself
+  `AVAILABLE` again when it reconnects. Connecting and the end-of-grace check take the same per-courier lock
+  (striped, 64 locks), so a reconnect can't land between "they're still gone" and "take them offline".
 - One socket per courier: a new connection closes the old one with code 4001; an unknown courier id is closed with
   4004. Courier apps are native clients (no `Origin` header, which Spring allows); browsers from other origins
   are refused by Spring's default same-origin check.
@@ -300,20 +340,47 @@ Check constraints keep coordinates in range and statuses to the known values.
 - **Offer timeout** (D3): an offer not answered in 30 s (`dispatch.offers.timeout`) expires within the next 1 s
   tick; the order goes back to `PENDING` and is re-offered at once, the courier goes back to `AVAILABLE` and is
   skipped for that order.
-- **Courier disconnect** (D2–D3): a courier whose location goes stale (no ping for 60 s) drops out of candidates
-  (the `courier:seen` TTL); a pending offer to a disconnected courier expires normally, and a courier who
-  reconnects in time gets the open offer resent.
+- **Courier socket drops** (D4): reconnect within 10 s and nothing changes (the open offer is resent); stay away
+  longer and the held offer goes to the next courier and the courier goes offline (see "Reconnect grace").
+- **Courier goes silent** (D2): a courier whose location goes stale (no ping for 60 s) drops out of candidates (the
+  `courier:seen` TTL), whatever their socket is doing.
+- **Client retries** (D2, D4): a retried order POST with the same `Idempotency-Key` replays the original order,
+  even when the retry races the original; a retried accept or decline gets the same answer back. The simulator
+  sends 5% of orders twice and 5% of answers twice and checks both.
 - **A failing pass** (D3): logged; the zone stays schedulable and the next event or sweep retries.
 - **Redis loss:** positions are soft state. Couriers resend location every few seconds, so Redis refills itself.
-- *(D4)* Disconnect handling beyond expiry, retries, and the simulator's failure scenarios.
 
-Known gap: an order every nearby courier has declined stays `PENDING` until a new courier comes into range; there
-is no cap on attempts or escalation yet.
+Known gaps: an order every nearby courier has declined stays `PENDING` until a new courier comes into range (no
+cap on attempts or escalation). A courier whose socket is down but who finishes a delivery over HTTP becomes
+`AVAILABLE` and can be offered work they won't see until they reconnect; that offer falls back on the 30 s
+timeout. Presence lives in one process's memory, so a second app instance would need it in Redis.
 
-## Measurement plan *(D4)*
+## Measurement (D4): the load simulator
 
-A simulator replays 50K synthetic events (orders and location pings) against the API and records assignment
-latency (order created → offer sent). Report p50/p95 before and after one optimisation, with the command used.
+`src/test/java/.../sim/` is a load simulator that drives the app only through its public interfaces, the way the
+real clients would. `scripts/simulate.sh <label> [app properties]` starts the jar on a fresh `dispatch_sim` database
+(so every run starts empty), replays a scenario, writes `target/sim/<label>.json` and stops the app.
+
+- **The scenario** (`Scenario`, seeded, so a before/after pair replays identical events): 10,000 orders and 40,000
+  courier pings over 5 simulated minutes in 4 zones (real Boston neighbourhood centres, 3 km discs). Orders arrive
+  at a steady rate with a 60 s rush at 3× (minutes 2 to 3), 20% are `PRIORITY`, and 5% are POSTed twice with the
+  same key (a client retrying). Pings come from a random walk per courier, at most 60 m per ping. On top of the
+  50,000 events, 40 injected socket drops: 20 short (under 2.5 s, inside the grace) and 20 long (15–30 s, past it).
+  `standard` has 100 couriers per zone; `overload` has 60, which the rush overloads about twice over.
+- **The couriers** (`CourierBot`, one real WebSocket each): answer an offer after 0.2–1 s, decline 10% of them,
+  send 5% of answers twice, pick up 1–3 s after accepting and deliver 2–6 s after that, over HTTP. After a long drop
+  the bot finds itself offline and goes back online, as an app would.
+- **What's measured.** *First offer*: from just before the customer's POST is sent to the first offer for that
+  order arriving on any courier's socket, both read from `System.nanoTime()` in the simulator's JVM and joined by
+  order id at the end (an offer can arrive before the POST's own response). *Server side*: `orders.created_at` to
+  the first `assignments.offered_at`, from Postgres (offers are stamped at claim time, so this includes the pass's
+  own work). *Courier freed → next offer*: from a courier sending its delivery to its next offer; with orders
+  waiting it's the engine's reaction time. Plus `/actuator/metrics` pass counts and mean pass time, and the run's
+  correctness counters (duplicates, consistent retries, refused retries, deliveries).
+- **Percentiles are exact** (nearest rank over every sample), not histogram estimates.
+
+The simulator and the app share one Mac, so absolute numbers include contention between them; what's compared is
+the same scenario on the same build with one property flipped. Results and the commands are in the README.
 
 ## Ports
 
