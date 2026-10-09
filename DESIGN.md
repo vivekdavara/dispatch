@@ -169,13 +169,14 @@ from eight seeds and checks both passes make exactly the same offers, and the RE
 
 **What the measurement turned up.** On a static zone the two passes agree exactly, but under load they don't, and
 the snapshot pass is the one that follows the rule. The per-order pass looked couriers up live, so a courier who
-came free while a 200-order pass was on its 150th order went to the 150th order, ahead of the 149 that outranked
-it. The snapshot pass can't see a courier freed mid-pass; that courier's event starts the next pass, which serves
-the queue from the top. The simulator counts *priority inversions* (pairs in one zone where order A outranked B and
-was already waiting when B got its first offer, yet A's came later): in the second round of runs, 177,205 pairs with
-the per-order pass vs 56 with the snapshot pass in the standard scenario, and 522,301 vs 82 in the overload one. The visible effect is a much shorter tail (the oldest orders stop waiting minutes) and, in overload, a
-higher median: strict priority order behaves like first come, first served, and the old effectively random order
-let some new orders jump the queue.
+came free while a 200-order pass was on its 150th order went to the 150th order, ahead of the 149 that outranked it.
+The snapshot pass can't see a courier freed mid-pass; that courier's event starts the next pass, which serves the
+queue from the top. The simulator counts *priority inversions* (pairs in one zone where order A outranked B and was
+already waiting when B got its first offer, yet A's came later): in the second round of runs, 177,205 pairs with the
+per-order pass vs 56 with the snapshot pass in the standard scenario, and 522,301 vs 82 in the overload one. The
+visible effect is a much shorter tail (the oldest orders stop waiting minutes) and, in overload, a higher median:
+strict priority order behaves like first come, first served, and the old effectively random order let some new
+orders jump the queue.
 
 Why this can't deadlock: a claim holds one order row and waits on a courier row only while it holds no courier;
 the transaction holding that courier has already finished claiming and doesn't wait on anything. Why it can't
