@@ -63,6 +63,8 @@ final class CourierBot implements WebSocket.Listener {
     /** java.net.http allows one outstanding send per socket, so sends are chained. */
     private CompletableFuture<?> sends = CompletableFuture.completedFuture(null);
     private volatile boolean reconnecting;
+    /** When this courier's last delivery was sent, until its next offer arrives; -1 when not waiting. */
+    private volatile long freedAt = -1;
 
     CourierBot(int index, String courierId, DispatchApi api, ObjectMapper json, Recorder rec,
                ScheduledExecutorService timers, Behaviour behaviour, double speed, long seed) {
@@ -166,6 +168,11 @@ final class CourierBot implements WebSocket.Listener {
                 rec.firstOfferAt.putIfAbsent(orderId, now);
                 if (orderOf.putIfAbsent(assignmentId, orderId) == null) {
                     rec.offers.increment();
+                    long freed = freedAt;
+                    if (freed > 0) {
+                        freedAt = -1;
+                        rec.freedToNextOffer.add(now - freed);
+                    }
                 } else {
                     rec.offersResent.increment(); // resent after a reconnect
                 }
@@ -257,9 +264,17 @@ final class CourierBot implements WebSocket.Listener {
     }
 
     private void post(long assignmentId, String what, String deliveredOrderId) {
+        if (deliveredOrderId != null) {
+            // The courier is free once this commits, which can be before its response arrives (the next offer
+            // sometimes beats it), so the clock starts at the send.
+            freedAt = System.nanoTime();
+        }
         api.callAsync("POST", "/api/v1/assignments/" + assignmentId + "/" + what, Map.of("courierId", courierId))
                 .whenComplete((status, e) -> {
                     if (e != null || status != 200) {
+                        if (deliveredOrderId != null) {
+                            freedAt = -1;
+                        }
                         rec.deliveryErrors.increment();
                         rec.note("courier " + index + " " + what + " of assignment " + assignmentId + ": "
                                 + (e != null ? e.toString() : "HTTP " + status));

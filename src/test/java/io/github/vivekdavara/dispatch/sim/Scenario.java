@@ -75,11 +75,26 @@ public final class Scenario {
         }
 
         /**
-         * The 50,000-event workload in the README: 10,000 orders and 40,000 pings over 5 simulated minutes,
-         * 4 zones of 60 couriers, a 60 s rush at 3x the base order rate.
+         * The 50,000-event workload in the README: 10,000 orders and 40,000 pings over 5 simulated minutes, 4 zones
+         * of 100 couriers, a 60 s rush at 3x the base order rate, 40 socket drops. With the bots' delivery times
+         * (about 6.6 s per order) the fleet runs at about 40% of capacity at the base rate and about 120% in the
+         * rush, so there's a real backlog to clear without every number being a measure of courier shortage.
          */
         public static Config standard() {
-            return new Config(20261009L, 4, 60, 10_000, 40_000, Duration.ofMinutes(5), 0.2, 0.05,
+            return withCouriersPerZone(100);
+        }
+
+        /**
+         * The same events with 60 couriers per zone: about 65% of capacity at the base rate and about twice
+         * capacity in the rush. Latency there is mostly orders queueing for a free courier; it's the stress case
+         * where engine passes walk a full 200-order batch.
+         */
+        public static Config overload() {
+            return withCouriersPerZone(60);
+        }
+
+        private static Config withCouriersPerZone(int couriers) {
+            return new Config(20261009L, 4, couriers, 10_000, 40_000, Duration.ofMinutes(5), 0.2, 0.05,
                     Duration.ofSeconds(120), Duration.ofSeconds(60), 3.0,
                     20, Duration.ofMillis(2_500), 20, Duration.ofSeconds(15), Duration.ofSeconds(30));
         }

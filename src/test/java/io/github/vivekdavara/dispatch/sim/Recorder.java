@@ -27,6 +27,12 @@ final class Recorder {
     final Map<String, Long> acceptedAt = new ConcurrentHashMap<>();
     /** Order ids delivered. */
     final Map<String, Long> deliveredAt = new ConcurrentHashMap<>();
+    /**
+     * For each delivery, how long until that courier's next offer arrived: from sending the delivery (the courier
+     * is free once it commits) to the next offer on its socket. With orders waiting, this is the engine's reaction
+     * time; with none waiting, it's mostly waiting for demand.
+     */
+    final Queue<Long> freedToNextOffer = new ConcurrentLinkedQueue<>();
 
     final LongAdder pingsSent = new LongAdder();
     final LongAdder pingErrors = new LongAdder();

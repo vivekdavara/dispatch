@@ -37,7 +37,8 @@ import java.util.concurrent.locks.LockSupport;
  * {@code --base-url} (default {@code http://localhost:8101}), {@code --speed} (replay speed, default 1),
  * {@code --label}, {@code --out} (JSON report path), {@code --db-url} (adds the server-side latency from Postgres
  * timestamps; put the user in the URL, {@code ?user=...}), {@code --drain-seconds} (how long to wait for the last
- * deliveries, default 180), {@code --scenario small} (the smoke test's 1,000-event scenario instead of 50,000).
+ * deliveries, default 180), {@code --scenario} ({@code standard}, the default; {@code overload}, the same 50,000
+ * events with fewer couriers; or {@code small}, the smoke test's 1,000 events).
  */
 public final class Simulator {
 
@@ -50,6 +51,7 @@ public final class Simulator {
     public record Report(String label, String runId, Instant startedAt, Map<String, Object> scenario,
                          Map<String, Object> replay, Map<String, Object> orders, Map<String, Object> couriers,
                          LatencySummary firstOffer, LatencySummary firstOfferServer, LatencySummary accepted,
+                         LatencySummary freedToNextOffer,
                          Map<String, Object> server, List<String> zoneIds, List<String> notes) {
 
         @SuppressWarnings("unchecked")
@@ -83,12 +85,18 @@ public final class Simulator {
         for (int i = 0; i + 1 < args.length; i += 2) {
             a.put(args[i].replaceFirst("^--", ""), args[i + 1]);
         }
-        boolean small = "small".equals(a.get("scenario"));
+        String name = a.getOrDefault("scenario", "standard");
+        boolean small = name.equals("small");
         Options options = new Options(URI.create(a.getOrDefault("base-url", "http://localhost:8101")),
                 Double.parseDouble(a.getOrDefault("speed", "1")), a.getOrDefault("label", "run"),
                 Duration.ofSeconds(Long.parseLong(a.getOrDefault("drain-seconds", "180"))), a.get("db-url"),
                 small ? CourierBot.Behaviour.quick() : CourierBot.Behaviour.standard());
-        Scenario.Config config = small ? Scenario.Config.small() : Scenario.Config.standard();
+        Scenario.Config config = switch (name) {
+            case "small" -> Scenario.Config.small();
+            case "overload" -> Scenario.Config.overload();
+            case "standard" -> Scenario.Config.standard();
+            default -> throw new IllegalArgumentException("--scenario must be standard, overload or small");
+        };
         Report report = new Simulator(Scenario.generate(config), options).run();
         Path out = Path.of(a.getOrDefault("out", "target/sim/" + options.label() + ".json"));
         Files.createDirectories(out.toAbsolutePath().getParent());
@@ -307,7 +315,9 @@ public final class Simulator {
         }
         return new Report(options.label(), runId, startedAt, scenarioInfo, replay, orders, couriers,
                 LatencySummary.ofNanos(rec.sinceOrderSent(rec.firstOfferAt)), serverSideFirstOffer(),
-                LatencySummary.ofNanos(rec.sinceOrderSent(rec.acceptedAt)), serverMetrics(), zoneIds, rec.notes());
+                LatencySummary.ofNanos(rec.sinceOrderSent(rec.acceptedAt)),
+                LatencySummary.ofNanos(rec.freedToNextOffer.stream().mapToLong(Long::longValue).toArray()),
+                serverMetrics(), zoneIds, rec.notes());
     }
 
     /** The engine's own view, from Postgres: order {@code created_at} to its first {@code offered_at}. */
@@ -395,6 +405,8 @@ public final class Simulator {
             log("first offer, server side (created_at -> offered_at): %s", r.firstOfferServer().describe());
         }
         log("accepted (POST sent -> accept acknowledged): %s", r.accepted().describe());
+        log("courier freed -> next offer (deliver sent -> next offer on its socket): %s",
+                r.freedToNextOffer().describe());
         log("server: %s", r.server());
         r.notes().forEach(n -> log("note: %s", n));
     }

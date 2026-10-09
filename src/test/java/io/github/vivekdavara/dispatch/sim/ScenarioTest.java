@@ -79,8 +79,17 @@ class ScenarioTest {
             perCourier.merge(p.courier(), 1, Integer::sum);
         }
         assertThat(perCourier).hasSize(STANDARD.config().couriers());
-        // 40,000 pings over 240 couriers: 166 or 167 each.
-        assertThat(perCourier.values()).allSatisfy(n -> assertThat(n).isBetween(166, 167));
+        // 40,000 pings over 400 couriers: 100 each.
+        assertThat(perCourier.values()).allSatisfy(n -> assertThat(n).isEqualTo(100));
+    }
+
+    @Test
+    void theOverloadScenarioHasTheSameOrdersWithFewerCouriers() {
+        Scenario overload = Scenario.generate(Scenario.Config.overload());
+
+        assertThat(overload.config().couriers()).isEqualTo(240);
+        assertThat(orders(overload)).isEqualTo(orders(STANDARD));
+        assertThat(pings(overload)).hasSize(40_000);
     }
 
     @Test
