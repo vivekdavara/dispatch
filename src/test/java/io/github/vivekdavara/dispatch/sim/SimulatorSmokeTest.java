@@ -82,6 +82,8 @@ class SimulatorSmokeTest {
         // Only a drop longer than the grace can cost a courier their status; the scenario has two of those.
         assertThat(report.count("couriers", "foundOfflineOnReconnect")).isBetween(0L, 2L);
         assertThat(report.firstOffer().count()).isEqualTo(200);
+        assertThat(report.firstOfferByTier().keySet()).containsExactlyInAnyOrder("STANDARD", "PRIORITY");
+        assertThat(report.firstOfferByTier().values().stream().mapToInt(LatencySummary::count).sum()).isEqualTo(200);
 
         String run = report.runId() + "-z%";
         assertThat(jdbc.queryForObject("SELECT count(*) FROM orders WHERE zone_id LIKE ?", Long.class, run))

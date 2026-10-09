@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.vivekdavara.dispatch.domain.GeoPoint;
+import io.github.vivekdavara.dispatch.domain.OrderTier;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -16,6 +17,7 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -51,7 +53,7 @@ public final class Simulator {
     public record Report(String label, String runId, Instant startedAt, Map<String, Object> scenario,
                          Map<String, Object> replay, Map<String, Object> orders, Map<String, Object> couriers,
                          LatencySummary firstOffer, LatencySummary firstOfferServer, LatencySummary accepted,
-                         LatencySummary freedToNextOffer,
+                         LatencySummary freedToNextOffer, Map<String, LatencySummary> firstOfferByTier,
                          Map<String, Object> server, List<String> zoneIds, List<String> notes) {
 
         @SuppressWarnings("unchecked")
@@ -318,7 +320,26 @@ public final class Simulator {
                 LatencySummary.ofNanos(rec.sinceOrderSent(rec.firstOfferAt)), serverSideFirstOffer(),
                 LatencySummary.ofNanos(rec.sinceOrderSent(rec.acceptedAt)),
                 LatencySummary.ofNanos(rec.freedToNextOffer.stream().mapToLong(Long::longValue).toArray()),
-                serverMetrics(), zoneIds, rec.notes());
+                firstOfferByTier(), serverMetrics(), zoneIds, rec.notes());
+    }
+
+    /** First-offer latency per tier: who waits changes with the serving order even when the total doesn't. */
+    private Map<String, LatencySummary> firstOfferByTier() {
+        Map<OrderTier, List<Long>> byTier = new EnumMap<>(OrderTier.class);
+        for (Scenario.Event e : scenario.events()) {
+            if (e instanceof Scenario.NewOrder o) {
+                String id = rec.orderIdOf.get(o.index());
+                Long sent = rec.orderSentAt.get(o.index());
+                Long offered = id == null ? null : rec.firstOfferAt.get(id);
+                if (sent != null && offered != null) {
+                    byTier.computeIfAbsent(o.tier(), t -> new ArrayList<>()).add(offered - sent);
+                }
+            }
+        }
+        Map<String, LatencySummary> result = new LinkedHashMap<>();
+        byTier.forEach((tier, nanos) -> result.put(tier.name(),
+                LatencySummary.ofNanos(nanos.stream().mapToLong(Long::longValue).toArray())));
+        return result;
     }
 
     /** The engine's own view, from Postgres: order {@code created_at} to its first {@code offered_at}. */
@@ -441,6 +462,7 @@ public final class Simulator {
         log("accepted (POST sent -> accept acknowledged): %s", r.accepted().describe());
         log("courier freed -> next offer (deliver sent -> next offer on its socket): %s",
                 r.freedToNextOffer().describe());
+        r.firstOfferByTier().forEach((tier, s) -> log("first offer, %s orders: %s", tier, s.describe()));
         log("server: %s", r.server());
         r.notes().forEach(n -> log("note: %s", n));
     }
