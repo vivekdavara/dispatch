@@ -312,6 +312,7 @@ public final class Simulator {
 
         if (options.dbUrl() != null) {
             orders.put("assignmentsByStatus", assignmentsByStatus());
+            orders.put("priorityInversions", priorityInversions());
         }
         return new Report(options.label(), runId, startedAt, scenarioInfo, replay, orders, couriers,
                 LatencySummary.ofNanos(rec.sinceOrderSent(rec.firstOfferAt)), serverSideFirstOffer(),
@@ -365,6 +366,39 @@ public final class Simulator {
             log("assignment counts unavailable: %s", e.getMessage());
         }
         return byStatus;
+    }
+
+    /**
+     * How often the serving order was broken, from Postgres: pairs of orders in one zone where order A outranked
+     * order B (an earlier {@code created_at} minus the tier bonus) and was already waiting when B got its first
+     * offer, yet A's first offer came later. Some are legitimate (A's only couriers in range had refused it); the
+     * rest are a pass handing a courier to whichever order it happened to be on.
+     */
+    private long priorityInversions() {
+        try (Connection db = DriverManager.getConnection(options.dbUrl());
+             PreparedStatement q = db.prepareStatement("""
+                     WITH f AS (
+                         SELECT o.id, o.zone_id, o.created_at,
+                                o.created_at - CASE WHEN o.tier = 'PRIORITY' THEN interval '10 minutes'
+                                                    ELSE interval '0' END AS rank_time,
+                                min(a.offered_at) AS first_offer
+                           FROM orders o JOIN assignments a ON a.order_id = o.id
+                          WHERE o.zone_id LIKE ?
+                          GROUP BY o.id)
+                     SELECT count(*)
+                       FROM f b JOIN f a ON a.zone_id = b.zone_id
+                      WHERE a.rank_time < b.rank_time
+                        AND a.created_at < b.first_offer
+                        AND a.first_offer > b.first_offer""")) {
+            q.setString(1, runId + "-z%");
+            try (ResultSet rs = q.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        } catch (SQLException e) {
+            log("priority inversions unavailable: %s", e.getMessage());
+            return -1;
+        }
     }
 
     /** Engine pass counts and timings from {@code /actuator/metrics}; cumulative since the app started. */
