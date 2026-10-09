@@ -4,6 +4,9 @@ import io.github.vivekdavara.dispatch.config.DispatchProperties;
 import io.github.vivekdavara.dispatch.courier.CourierLocations;
 import io.github.vivekdavara.dispatch.domain.CourierRanking;
 import io.github.vivekdavara.dispatch.domain.PriorityScore;
+import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -27,6 +30,9 @@ import org.springframework.transaction.support.TransactionTemplate;
  * at once: the compare-and-sets and the partial unique indexes make double assignment impossible.
  *
  * <p>Each committed claim is published as an {@link Offer} event; the courier socket pushes it to the courier.
+ *
+ * <p>Every pass is timed ({@code dispatch.pass}) and counts the pending orders it looked at
+ * ({@code dispatch.pass.orders}); both are on {@code /actuator/metrics}, and the simulator reads them.
  */
 @Service
 public class AssignmentEngine {
@@ -38,9 +44,12 @@ public class AssignmentEngine {
     private final double maxPickupMeters;
     private final int pendingBatch;
     private final ApplicationEventPublisher events;
+    private final Timer passTimer;
+    private final DistributionSummary passOrders;
 
     public AssignmentEngine(AssignmentRepository repo, CourierLocations locations, TransactionTemplate tx,
-                            Clock clock, DispatchProperties props, ApplicationEventPublisher events) {
+                            Clock clock, DispatchProperties props, ApplicationEventPublisher events,
+                            MeterRegistry meters) {
         this.repo = repo;
         this.locations = locations;
         this.tx = tx;
@@ -48,16 +57,24 @@ public class AssignmentEngine {
         this.maxPickupMeters = props.assignment().maxPickupKm() * 1000;
         this.pendingBatch = props.assignment().pendingBatch();
         this.events = events;
+        this.passTimer = Timer.builder("dispatch.pass").description("one engine pass over a zone").register(meters);
+        this.passOrders = DistributionSummary.builder("dispatch.pass.orders")
+                .description("pending orders one pass looked at").register(meters);
     }
 
     /** One pass over the zone: offers as many pending orders as there are free couriers in range. */
     public List<Offer> dispatchZone(String zoneId) {
+        return passTimer.record(() -> pass(zoneId));
+    }
+
+    private List<Offer> pass(String zoneId) {
         Instant now = clock.instant();
         List<AssignmentRepository.PendingOrder> pending = new ArrayList<>(repo.pendingOrders(zoneId, pendingBatch));
         // The SQL already orders by priority; re-sorting with the rule itself keeps PriorityScore the single
         // definition (it also treats orders stamped in the future, by clock skew, as zero wait).
         Comparator<PriorityScore.Candidate> serving = PriorityScore.servingOrder(now);
         pending.sort(Comparator.comparing(o -> new PriorityScore.Candidate(o.id(), o.tier(), o.createdAt()), serving));
+        passOrders.record(pending.size());
 
         List<Offer> offers = new ArrayList<>();
         for (AssignmentRepository.PendingOrder order : pending) {

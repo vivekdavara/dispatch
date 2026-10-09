@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.within;
 import io.github.vivekdavara.dispatch.courier.CourierLocations;
 import io.github.vivekdavara.dispatch.domain.OrderTier;
 import io.github.vivekdavara.dispatch.support.Fixtures;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
@@ -37,6 +38,9 @@ class AssignmentEngineTest {
 
     @Autowired
     CourierLocations locations;
+
+    @Autowired
+    MeterRegistry meters;
 
     Fixtures f;
 
@@ -174,5 +178,19 @@ class AssignmentEngineTest {
                 .containsExactly(s20, p5, s12, p0, s1);
         assertThat(repo.pendingOrders(f.zoneId(), 2)).extracting(AssignmentRepository.PendingOrder::id)
                 .containsExactly(s20, p5);
+    }
+
+    @Test
+    void everyPassIsTimedAndCountsTheOrdersItLookedAt() {
+        f.availableCourier(Fixtures.north(300), MINUTE);
+        f.order(OrderTier.STANDARD, MINUTE);
+        f.order(OrderTier.STANDARD, MINUTE.multipliedBy(2));
+        long passesBefore = meters.get("dispatch.pass").timer().count();
+        double ordersBefore = meters.get("dispatch.pass.orders").summary().totalAmount();
+
+        engine.dispatchZone(f.zoneId());
+
+        assertThat(meters.get("dispatch.pass").timer().count()).isEqualTo(passesBefore + 1);
+        assertThat(meters.get("dispatch.pass.orders").summary().totalAmount()).isEqualTo(ordersBefore + 2);
     }
 }

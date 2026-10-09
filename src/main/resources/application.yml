@@ -27,7 +27,8 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        # metrics: engine pass timings (dispatch.pass, dispatch.pass.orders) for the simulator's report.
+        include: health,info,metrics
   endpoint:
     health:
       show-details: always

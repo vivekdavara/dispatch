@@ -35,4 +35,12 @@ class HealthEndpointsTest {
                 .andExpect(jsonPath("$.components.db.status").value("UP"))
                 .andExpect(jsonPath("$.components.redis.status").value("UP"));
     }
+
+    @Test
+    void metricsEndpointServesTheEnginePassTimer() throws Exception {
+        mvc.perform(get("/actuator/metrics/dispatch.pass"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.name").value("dispatch.pass"))
+                .andExpect(jsonPath("$.measurements[0].statistic").value("COUNT"));
+    }
 }
