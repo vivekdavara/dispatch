@@ -10,6 +10,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.AfterEach;
@@ -26,15 +27,19 @@ import org.springframework.test.annotation.DirtiesContext;
 
 /**
  * An offer's {@code offeredAt} is when it was claimed. With a clock that moves one second per reading, two offers
- * made in one pass must carry different times, both after the pass began.
+ * made in one pass must carry different times, both after the pass began, and the event's time must be exactly
+ * the stored one.
  */
 @SpringBootTest
 @DirtiesContext
 class OfferTimestampTest {
 
-    /** Starts now and moves one second every time it's read. */
+    /**
+     * Starts now and moves one second every time it's read. Its readings have nanoseconds, as Linux clocks do
+     * (macOS stops at microseconds), so a time that isn't truncated before Postgres rounds it can't match.
+     */
     static final class TickingClock extends Clock {
-        private final Instant start = Instant.now();
+        private final Instant start = Instant.now().truncatedTo(ChronoUnit.SECONDS).plusNanos(123_456_789);
         private final AtomicLong reads = new AtomicLong();
 
         @Override

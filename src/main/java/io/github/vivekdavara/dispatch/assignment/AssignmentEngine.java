@@ -9,6 +9,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -176,9 +177,11 @@ public class AssignmentEngine {
     /**
      * Stamped with the time of the claim, not of the pass: a pass can take a while to reach an order, and the
      * offer's 30 s answer window (and the measured assignment latency) must start when the courier gets it.
+     * Truncated to microseconds, Postgres's precision, so the Offer event and the stored row carry the same time
+     * (Linux clocks have nanoseconds; Postgres would round them).
      */
     private Optional<Offer> claim(UUID orderId, List<CourierRanking.Ranked> ranked) {
-        Instant now = clock.instant();
+        Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
         return tx.execute(status -> {
             if (!repo.markOrderOffered(orderId, now)) {
                 return Optional.<Offer>empty(); // another pass took this order
