@@ -182,7 +182,9 @@ class AssignmentEngineTest {
 
     @Test
     void everyPassIsTimedAndCountsTheOrdersItLookedAt() {
+        // Two couriers for two orders: the pass looks at both (with one courier it would stop after the first).
         f.availableCourier(Fixtures.north(300), MINUTE);
+        f.availableCourier(Fixtures.north(600), MINUTE);
         f.order(OrderTier.STANDARD, MINUTE);
         f.order(OrderTier.STANDARD, MINUTE.multipliedBy(2));
         long passesBefore = meters.get("dispatch.pass").timer().count();

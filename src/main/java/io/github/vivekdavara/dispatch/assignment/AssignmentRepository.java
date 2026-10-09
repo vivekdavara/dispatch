@@ -3,12 +3,16 @@ package io.github.vivekdavara.dispatch.assignment;
 import io.github.vivekdavara.dispatch.domain.GeoPoint;
 import io.github.vivekdavara.dispatch.domain.OrderTier;
 import io.github.vivekdavara.dispatch.order.OrderStatus;
+import java.sql.Array;
+import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -18,9 +22,16 @@ import org.springframework.stereotype.Repository;
 @Repository
 public class AssignmentRepository {
 
-    /** The fields of a pending order the engine needs. */
-    public record PendingOrder(UUID id, OrderTier tier, Instant createdAt, GeoPoint pickup) {
+    /**
+     * The fields of a pending order the engine needs. {@code refusedBy} (couriers who declined it or let an offer
+     * of it expire) is filled in by {@link #pendingWithRefusals} only; {@link #pendingOrders} leaves it empty.
+     */
+    public record PendingOrder(UUID id, OrderTier tier, Instant createdAt, GeoPoint pickup, Set<UUID> refusedBy) {
     }
+
+    /** {@code created_at} minus the tier bonus: sorting by it is sorting by priority score (see pendingOrders). */
+    private static final String SERVING_ORDER = " ORDER BY created_at - (CASE WHEN tier = 'PRIORITY' THEN ? ELSE 0"
+            + " END) * interval '1 minute', created_at, id LIMIT ?";
 
     /** Works in a SELECT from assignments and in an UPDATE's RETURNING; the zone comes from the order. */
     static final String COLUMNS = "id, order_id, courier_id, (SELECT o.zone_id FROM orders o WHERE o.id = order_id)"
@@ -54,16 +65,63 @@ public class AssignmentRepository {
         return jdbc.query("""
                         SELECT id, tier, created_at, pickup_lat, pickup_lng
                           FROM orders
-                         WHERE zone_id = ? AND status = 'PENDING'
-                         ORDER BY created_at - (CASE WHEN tier = 'PRIORITY' THEN ? ELSE 0 END) * interval '1 minute',
-                                  created_at, id
-                         LIMIT ?""",
+                         WHERE zone_id = ? AND status = 'PENDING'""" + SERVING_ORDER,
                 (rs, n) -> new PendingOrder(
                         rs.getObject("id", UUID.class),
                         OrderTier.valueOf(rs.getString("tier")),
                         rs.getTimestamp("created_at").toInstant(),
-                        new GeoPoint(rs.getDouble("pickup_lat"), rs.getDouble("pickup_lng"))),
+                        new GeoPoint(rs.getDouble("pickup_lat"), rs.getDouble("pickup_lng")),
+                        Set.of()),
                 zoneId, OrderTier.PRIORITY.bonusMinutes(), limit);
+    }
+
+    /**
+     * {@link #pendingOrders} plus each order's refusals (the couriers who declined it or let an offer of it
+     * expire), in the same query, so a pass can filter candidates without asking Postgres once per order.
+     */
+    public List<PendingOrder> pendingWithRefusals(String zoneId, int limit) {
+        return jdbc.query("""
+                        SELECT id, tier, created_at, pickup_lat, pickup_lng,
+                               ARRAY(SELECT a.courier_id
+                                       FROM assignments a
+                                      WHERE a.order_id = orders.id AND a.status IN ('DECLINED', 'EXPIRED')) AS refused
+                          FROM orders
+                         WHERE zone_id = ? AND status = 'PENDING'""" + SERVING_ORDER,
+                (rs, n) -> new PendingOrder(
+                        rs.getObject("id", UUID.class),
+                        OrderTier.valueOf(rs.getString("tier")),
+                        rs.getTimestamp("created_at").toInstant(),
+                        new GeoPoint(rs.getDouble("pickup_lat"), rs.getDouble("pickup_lng")),
+                        uuids(rs.getArray("refused"))),
+                zoneId, OrderTier.PRIORITY.bonusMinutes(), limit);
+    }
+
+    /**
+     * The zone's AVAILABLE couriers and when each became idle: one query per pass instead of one per order. As in
+     * {@link #availableIdleSince}, a courier without {@code idle_since} counts as idle since its last update.
+     */
+    public Map<UUID, Instant> availableInZone(String zoneId) {
+        Map<UUID, Instant> result = new HashMap<>();
+        jdbc.query("""
+                        SELECT id, coalesce(idle_since, updated_at) AS idle
+                          FROM couriers
+                         WHERE zone_id = ? AND status = 'AVAILABLE'""",
+                rs -> {
+                    result.put(rs.getObject("id", UUID.class), rs.getTimestamp("idle").toInstant());
+                },
+                zoneId);
+        return result;
+    }
+
+    private static Set<UUID> uuids(Array array) throws SQLException {
+        if (array == null) {
+            return Set.of();
+        }
+        try {
+            return Set.copyOf(Arrays.asList((UUID[]) array.getArray()));
+        } finally {
+            array.free();
+        }
     }
 
     /**

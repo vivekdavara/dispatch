@@ -18,10 +18,14 @@ public record DispatchProperties(@DefaultValue Locations locations, @DefaultValu
     }
 
     /**
-     * @param maxPickupKm  candidates must be at most this far from the pickup
-     * @param pendingBatch how many of a zone's oldest pending orders one engine pass considers
+     * @param maxPickupKm       candidates must be at most this far from the pickup
+     * @param pendingBatch      how many of a zone's oldest pending orders one engine pass considers
+     * @param candidateSnapshot true: read the zone's AVAILABLE couriers once per pass (and stop when none are
+     *                          left); false: the original one-query-per-order pass, kept for the before/after
+     *                          measurement
      */
-    public record Assignment(@DefaultValue("5.0") double maxPickupKm, @DefaultValue("200") int pendingBatch) {
+    public record Assignment(@DefaultValue("5.0") double maxPickupKm, @DefaultValue("200") int pendingBatch,
+                             @DefaultValue("true") boolean candidateSnapshot) {
     }
 
     /**
