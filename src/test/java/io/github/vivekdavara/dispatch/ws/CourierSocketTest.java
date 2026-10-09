@@ -183,6 +183,24 @@ class CourierSocketTest {
     }
 
     @Test
+    void aRetriedAcceptIsAcknowledgedAgainAndClosesTheOfferOnce() throws Exception {
+        UUID courier = f.availableCourier(Fixtures.north(300), MINUTE);
+        Client app = connect(courier);
+        createOrder();
+        long assignment = app.next("offer").path("assignmentId").asLong();
+
+        app.send("accept", assignment);
+        app.send("accept", assignment); // the app didn't see the first ack and retried
+
+        assertThat(app.next("accepted").path("assignmentId").asLong()).isEqualTo(assignment);
+        assertThat(app.next("accepted").path("assignmentId").asLong()).isEqualTo(assignment);
+        assertThat(app.next("offer_closed").path("status").asText()).isEqualTo("ACCEPTED");
+        assertThat(app.inbox.poll(300, TimeUnit.MILLISECONDS)).isNull(); // no second offer_closed, no error
+        assertThat(app.skipped).noneMatch(m -> m.path("type").asText().equals("offer_closed")
+                || m.path("type").asText().equals("error"));
+    }
+
+    @Test
     void aDeclineOverTheSocketSendsTheOrderToTheNextCourier() throws Exception {
         UUID near = f.availableCourier(Fixtures.north(200), MINUTE);
         UUID far = f.availableCourier(Fixtures.north(1_500), MINUTE);

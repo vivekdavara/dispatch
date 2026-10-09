@@ -30,6 +30,10 @@ import org.springframework.transaction.support.TransactionTemplate;
  *
  * After an accept, the same courier reports {@link #pickedUp} (order PICKED_UP) and {@link #delivered}
  * (assignment COMPLETED, order DELIVERED, courier AVAILABLE again).
+ *
+ * <p>Answers are idempotent per courier: repeating an accept or a decline that already took effect returns the
+ * same assignment instead of an error, so courier apps can retry after a dropped connection. A different answer
+ * to a settled offer (accepting a declined one, say) is still a 409.
  */
 @Service
 public class OfferService {
@@ -58,23 +62,44 @@ public class OfferService {
         return offeredAt.plus(timeout);
     }
 
+    /**
+     * Accepts the offer. Repeating an accept that already worked returns the same assignment and changes nothing
+     * (an app whose connection dropped before the acknowledgement must be able to retry); accepting an offer that
+     * ended any other way is a 409.
+     */
     public Assignment accept(long assignmentId, UUID courierId) {
         Instant now = clock.instant();
-        Assignment accepted = tx.execute(status -> {
-            Assignment a = assignments.transition(assignmentId, courierId, AssignmentStatus.OFFERED,
-                            AssignmentStatus.ACCEPTED, now)
-                    .orElseThrow(() -> refusal(assignmentId, courierId, "accept"));
-            follow(assignments.moveOrder(a.orderId(), OrderStatus.OFFERED, OrderStatus.ASSIGNED, now), a, "order");
-            follow(couriers.transition(courierId, CourierStatus.OFFERED, CourierStatus.BUSY, now), a, "courier");
+        Optional<Assignment> accepted = tx.execute(status -> {
+            var a = assignments.transition(assignmentId, courierId, AssignmentStatus.OFFERED,
+                    AssignmentStatus.ACCEPTED, now);
+            a.ifPresent(won -> {
+                follow(assignments.moveOrder(won.orderId(), OrderStatus.OFFERED, OrderStatus.ASSIGNED, now), won,
+                        "order");
+                follow(couriers.transition(courierId, CourierStatus.OFFERED, CourierStatus.BUSY, now), won,
+                        "courier");
+            });
             return a;
         });
-        events.publishEvent(new OfferClosed(accepted));
-        return accepted;
+        if (accepted.isEmpty()) {
+            // Picked up and delivered since still means this accept took effect.
+            return repeated(assignmentId, courierId, AssignmentStatus.ACCEPTED, AssignmentStatus.COMPLETED)
+                    .orElseThrow(() -> refusal(assignmentId, courierId, "accept"));
+        }
+        events.publishEvent(new OfferClosed(accepted.get()));
+        return accepted.get();
     }
 
+    /** Declines the offer. Like {@link #accept}, repeating a decline that already worked is harmless. */
     public Assignment decline(long assignmentId, UUID courierId) {
         return release(assignmentId, courierId, AssignmentStatus.DECLINED, clock.instant())
+                .or(() -> repeated(assignmentId, courierId, AssignmentStatus.DECLINED))
                 .orElseThrow(() -> refusal(assignmentId, courierId, "decline"));
+    }
+
+    /** This courier's assignment, if it already ended up in one of {@code outcomes}: the answer is a repeat. */
+    private Optional<Assignment> repeated(long assignmentId, UUID courierId, AssignmentStatus... outcomes) {
+        return assignments.find(assignmentId)
+                .filter(a -> a.courierId().equals(courierId) && List.of(outcomes).contains(a.status()));
     }
 
     /** The courier collected the order: ASSIGNED to PICKED_UP. */

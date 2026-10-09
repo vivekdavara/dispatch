@@ -87,14 +87,61 @@ class OfferServiceTest {
     }
 
     @Test
-    void anOfferCanBeAnsweredOnlyOnce() {
+    void anAcceptedOfferCannotBeDeclined() {
         offers.accept(offer.assignmentId(), courier);
 
-        assertThatThrownBy(() -> offers.accept(offer.assignmentId(), courier))
-                .isInstanceOf(ApiErrors.ConflictException.class).hasMessageContaining("ACCEPTED");
         assertThatThrownBy(() -> offers.decline(offer.assignmentId(), courier))
-                .isInstanceOf(ApiErrors.ConflictException.class);
+                .isInstanceOf(ApiErrors.ConflictException.class).hasMessageContaining("ACCEPTED");
         assertThat(f.orderStatus(order)).isEqualTo("ASSIGNED");
+    }
+
+    @Test
+    void aDeclinedOfferCannotBeAccepted() {
+        offers.decline(offer.assignmentId(), courier);
+
+        assertThatThrownBy(() -> offers.accept(offer.assignmentId(), courier))
+                .isInstanceOf(ApiErrors.ConflictException.class).hasMessageContaining("DECLINED");
+        assertThat(f.orderStatus(order)).isEqualTo("PENDING");
+    }
+
+    @Test
+    void repeatingAnAcceptReturnsTheSameAssignmentAndChangesNothing() {
+        Assignment first = offers.accept(offer.assignmentId(), courier);
+
+        Assignment again = offers.accept(offer.assignmentId(), courier);
+
+        assertThat(again).isEqualTo(first);
+        assertThat(List.of(f.orderStatus(order), f.courierStatus(courier))).containsExactly("ASSIGNED", "BUSY");
+    }
+
+    @Test
+    void repeatingAnAcceptAfterDeliveryIsStillHarmless() {
+        offers.accept(offer.assignmentId(), courier);
+        offers.pickedUp(offer.assignmentId(), courier);
+        offers.delivered(offer.assignmentId(), courier);
+
+        assertThat(offers.accept(offer.assignmentId(), courier).status()).isEqualTo(AssignmentStatus.COMPLETED);
+        assertThat(f.courierStatus(courier)).isEqualTo("AVAILABLE");
+    }
+
+    @Test
+    void repeatingADeclineReturnsTheSameAssignmentAndChangesNothing() {
+        Assignment first = offers.decline(offer.assignmentId(), courier);
+        Instant idle = f.idleSince(courier);
+
+        Assignment again = offers.decline(offer.assignmentId(), courier);
+
+        assertThat(again).isEqualTo(first);
+        assertThat(f.idleSince(courier)).isEqualTo(idle);
+        assertThat(f.orderStatus(order)).isEqualTo("PENDING");
+    }
+
+    @Test
+    void anotherCourierRepeatingSomeoneElsesAnswerStillGetsNotFound() {
+        offers.accept(offer.assignmentId(), courier);
+
+        assertThatThrownBy(() -> offers.accept(offer.assignmentId(), UUID.randomUUID()))
+                .isInstanceOf(ApiErrors.NotFoundException.class);
     }
 
     @Test
