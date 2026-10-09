@@ -84,6 +84,16 @@ public final class Scenario {
                     20, Duration.ofMillis(2_500), 20, Duration.ofSeconds(15), Duration.ofSeconds(30));
         }
 
+        /**
+         * A 1,000-event version for the CI smoke test and quick local checks: 200 orders and 800 pings over 20
+         * simulated seconds in 2 zones of 8 couriers, with 3 short and 2 long socket drops.
+         */
+        public static Config small() {
+            return new Config(7L, 2, 8, 200, 800, Duration.ofSeconds(20), 0.2, 0.1,
+                    Duration.ofSeconds(8), Duration.ofSeconds(4), 3.0,
+                    3, Duration.ofMillis(400), 2, Duration.ofSeconds(3), Duration.ofSeconds(4));
+        }
+
         public int couriers() {
             return zones * couriersPerZone;
         }
