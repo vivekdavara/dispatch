@@ -291,6 +291,35 @@ class CourierSocketTest {
     }
 
     @Test
+    void aReconnectCancelsTheGraceSoASecondDropGetsAFullOne() throws Exception {
+        UUID courier = f.availableCourier(Fixtures.north(300), MINUTE);
+        Client first = connect(courier);
+        first.next("hello");
+        long t0 = System.nanoTime();
+        first.session.close(); // grace (500 ms here) would end at t0 + 500 ms
+        awaitDisconnected(courier);
+        Client second = connect(courier);
+        second.next("hello");
+        sleepUntil(t0, 400);
+
+        second.session.close(); // a fresh grace: ends at about t0 + 900 ms
+        awaitDisconnected(courier);
+        sleepUntil(t0, 675);
+
+        // Past the first drop's grace: had its check not been cancelled by the reconnect, it would have taken the
+        // courier offline at t0 + 500 ms, while the second socket was already gone.
+        assertThat(f.courierStatus(courier)).isEqualTo("AVAILABLE");
+        awaitStatus(courier, "OFFLINE"); // the second drop's own grace runs out
+    }
+
+    static void sleepUntil(long t0, long millis) throws InterruptedException {
+        long left = t0 + TimeUnit.MILLISECONDS.toNanos(millis) - System.nanoTime();
+        if (left > 0) {
+            TimeUnit.NANOSECONDS.sleep(left);
+        }
+    }
+
+    @Test
     void anIdleCourierWhoDropsIsTakenOfflineAfterTheGrace() throws Exception {
         UUID courier = f.availableCourier(Fixtures.north(300), MINUTE);
         Client app = connect(courier);

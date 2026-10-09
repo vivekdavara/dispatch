@@ -171,7 +171,7 @@ Override with `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DAT
 
 ## Tests
 
-223 tests (`JAVA_HOME=/opt/homebrew/opt/openjdk@21 mvn test`, about a minute, 25 s of it the simulator smoke
+227 tests (`JAVA_HOME=/opt/homebrew/opt/openjdk@21 mvn test`, about a minute, 25 s of it the simulator smoke
 test); everything except the pure-function, scheduler, simulator-unit and mocked-health suites runs against real
 Postgres and Redis. Most tests turn the event loop off (`src/test/resources/config/application.yml`) to drive the
 engine by hand; the loop, socket, end-to-end and simulator suites turn it on in their own context.
@@ -194,9 +194,9 @@ engine by hand; the loop, socket, end-to-end and simulator suites turn it on in 
 | `AssignmentApiTest` | accept → pickup → deliver over HTTP, and the 404/409 cases (deliver before pickup rolls back) |
 | `PassSchedulerTest` | one pass per zone at a time, zones in parallel, bursts coalesce into one more pass, no request lost, a failing pass doesn't wedge the zone |
 | `DispatchLoopTest` | with the loop on and no manual passes: new order, decline, timeout, courier online, sweep, delivery each lead to an offer |
-| `CourierSocketTest` | real sockets: offer pushed, accept/decline over the wire, a retried accept acked twice, expiry seen on the wire, resend on reconnect, a drop past the grace hands the offer on and takes the courier offline, a busy courier is left alone, replace (4001), unknown courier (4004), bad messages |
+| `CourierSocketTest` | real sockets: offer pushed, accept/decline over the wire, a retried accept acked twice, expiry seen on the wire, resend on reconnect, a drop past the grace hands the offer on and takes the courier offline, a reconnect cancels the grace (a second drop gets a full one), a busy courier is left alone, replace (4001), unknown courier (4004), bad messages |
 | `DeliveryFlowTest` | one order from checkout to door through HTTP and the socket only |
-| `LatencySummaryTest`, `ScenarioTest` | the simulator's percentiles (nearest rank) and its seeded scenario: counts, determinism, zones, rush density, retry and drop shares |
+| `LatencySummaryTest`, `ScenarioTest`, `RecorderTest`, `ReportTableTest` | the simulator's percentiles (nearest rank), its seeded scenarios (counts, determinism, zones, rush density, retry and drop shares), the latency join, and the results table |
 | `SimulatorSmokeTest` | the simulator's 1,000-event scenario against the app: every order created once, offered and delivered; retries consistent; drops reconnected; the database agrees |
 
 ## Results (day 4)
