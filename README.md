@@ -277,14 +277,33 @@ per-order pass's standard max, 55.1 vs 65.9 s, and the millisecond medians are w
   snapshot pass never sees a courier freed mid-pass; that courier's event starts the next pass, which serves the
   queue from the top, as the rule in DESIGN.md says it should: 82 and 56 inverted pairs. What's left comes from
   orders a pass couldn't see yet (created while it ran) or couldn't serve (every courier in range had refused it, or
-  was over 5 km away); the simulator doesn't break them down yet, nor the 5% in the mean by tier. The same effect
-  shows in *freed → next offer* in overload: 2.3 / 2.6 ms before (grabbed mid-pass by whatever order was current) vs
-  7.7 / 7.8 ms after (the next pass's turnaround).
+  was over 5 km away). The same effect shows in *freed → next offer* in overload: 2.3 / 2.6 ms before (grabbed
+  mid-pass by whatever order was current) vs 7.7 / 7.8 ms after (the next pass's turnaround).
+
+### Who waits: by tier (round 3, overload, build `930803b`)
+
+A third overload pair, run after the report learned to split first-offer latency by tier
+(`firstOfferByTier` in the JSON; same commands with labels `overload-before-3` and `overload-after-3`):
+
+| Pass | PRIORITY p50 | p95 | mean | STANDARD p50 | p95 | mean | Inversions | Time to accepted courier, mean |
+|---|---|---|---|---|---|---|---|---|
+| per-order (before) | 4.6 s | 39.8 s | 9.5 s | 21.1 s | 77.1 s | 26.4 s | 519,234 | 24.9 s |
+| snapshot (after) | 50.5 ms | 397.3 ms | 114.6 ms | 33.5 s | 66.4 s | 30.3 s | 78 | 24.9 s |
+
+(1,988 PRIORITY and 8,012 STANDARD orders.) The rule says a PRIORITY order counts as 10 minutes older, so in a
+backlog of a minute or two it should go next. The per-order pass mostly ignored that under load (median 4.6 s,
+p95 40 s); the snapshot pass offers PRIORITY orders in about 50 ms even at twice capacity. STANDARD orders now wait
+behind every PRIORITY order, as the rule intends, so their median rises, but their p95 falls.
+
+The 5% rise in the mean *first offer* is the price of the same strictness: a declined order keeps its place at the
+front and is re-offered before newer orders get their first offer. What the customer waits for, an accepted courier,
+is unchanged on average in every pair: 24.83 to 24.88 s before vs 24.87 to 24.97 s after in overload, and 3.54 to
+3.55 s in both standard pairs (`accepted.meanMs`).
 
 The 50 m tie band, the fairness tie-break and the claim logic are untouched; `CandidateSnapshotTest` checks the two
 passes make identical offers whenever nothing changes mid-pass.
 
-### Correctness under load (all eight runs)
+### Correctness under load (all ten runs)
 
 - 10,000 orders created exactly once: 439 orders were POSTed twice with the same key, and all 439 retries got the
   original order back (`retriesConsistent`), with 0 duplicates.
@@ -297,9 +316,9 @@ passes make identical offers whenever nothing changes mid-pass.
 
 ### Limits of these numbers
 
-Two runs per configuration, one machine, synthetic load with made-up courier behaviour (the bots deliver in seconds,
-not minutes). The latency in both scenarios is mostly queueing for a free courier during the rush, which no engine
-change can remove; the engine's own share is the 3.9 to 4.6 ms server-side p50. The scenarios don't exercise
+Two or three runs per configuration, one machine, synthetic load with made-up courier behaviour (the bots deliver in
+seconds, not minutes). The latency in both scenarios is mostly queueing for a free courier during the rush, which no
+engine change can remove; the engine's own share is the 3.9 to 4.6 ms server-side p50. The scenarios don't exercise
 multiple app instances, real road distances, or a slow network.
 
 ## License

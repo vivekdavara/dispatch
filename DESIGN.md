@@ -176,7 +176,8 @@ already waiting when B got its first offer, yet A's came later): in the second r
 per-order pass vs 56 with the snapshot pass in the standard scenario, and 522,301 vs 82 in the overload one. The
 visible effect is a much shorter tail (the oldest orders stop waiting minutes) and, in overload, a higher median:
 strict priority order behaves like first come, first served, and the old effectively random order let some new
-orders jump the queue.
+orders jump the queue. Split by tier (overload, round 3), PRIORITY orders went from a 4.6 s median and a 39.8 s p95
+to 50 ms and 397 ms, which is what the 10-minute bonus is for; the mean time to an accepted courier didn't change.
 
 Why this can't deadlock: a claim holds one order row and waits on a courier row only while it holds no courier;
 the transaction holding that courier has already finished claiming and doesn't wait on anything. Why it can't
