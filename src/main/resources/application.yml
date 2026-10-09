@@ -55,3 +55,8 @@ dispatch:
     # Safety net: zones with pending orders get a pass this often even without an event (a courier driving into
     # range sends only location pings, which don't trigger passes).
     sweep-interval: 5s
+  sockets:
+    # A courier whose socket closes gets this long to reconnect (and is resent their open offer if they do). After
+    # that they're taken offline and an offer they held goes straight to the next courier, instead of waiting out
+    # the 30 s offer timeout.
+    reconnect-grace: 10s

@@ -7,7 +7,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 /** Tunables under {@code dispatch.*} in application.yml. */
 @ConfigurationProperties("dispatch")
 public record DispatchProperties(@DefaultValue Locations locations, @DefaultValue Assignment assignment,
-                                 @DefaultValue Offers offers, @DefaultValue Loop loop) {
+                                 @DefaultValue Offers offers, @DefaultValue Loop loop,
+                                 @DefaultValue Sockets sockets) {
 
     /**
      * @param freshFor how long a location ping keeps a courier eligible; a courier with no ping for longer is
@@ -39,5 +40,14 @@ public record DispatchProperties(@DefaultValue Locations locations, @DefaultValu
      */
     public record Loop(@DefaultValue("true") boolean enabled, @DefaultValue("4") int threads,
                        @DefaultValue("1s") Duration expiryInterval, @DefaultValue("5s") Duration sweepInterval) {
+    }
+
+    /**
+     * Courier sockets ({@code CourierSocketHandler}).
+     *
+     * @param reconnectGrace how long a courier whose socket closed has to reconnect before they're taken offline
+     *                       (and an offer they hold is released to the next courier)
+     */
+    public record Sockets(@DefaultValue("10s") Duration reconnectGrace) {
     }
 }

@@ -252,6 +252,45 @@ class OfferServiceTest {
         assertThat(f.assignmentStatus(offer.assignmentId())).isEqualTo(expected);
     }
 
+    @Test
+    void aDisconnectedCourierLosesTheirOfferAndGoesOfflineInOneStep() {
+        OfferService.Disconnect d = offers.disconnected(courier);
+
+        assertThat(d.wentOffline()).isTrue();
+        assertThat(d.released()).map(Assignment::id).contains(offer.assignmentId());
+        assertThat(f.assignmentStatus(offer.assignmentId())).isEqualTo("EXPIRED");
+        assertThat(f.orderStatus(order)).isEqualTo("PENDING");
+        assertThat(f.courierStatus(courier)).isEqualTo("OFFLINE");
+        assertThat(redis.hasKey(CourierLocations.seenKey(courier))).isFalse();
+    }
+
+    @Test
+    void aDisconnectedIdleCourierJustGoesOffline() {
+        UUID idle = f.availableCourier(Fixtures.north(2_000), Duration.ofMinutes(5));
+
+        OfferService.Disconnect d = offers.disconnected(idle);
+
+        assertThat(d.wentOffline()).isTrue();
+        assertThat(d.released()).isEmpty();
+        assertThat(f.courierStatus(idle)).isEqualTo("OFFLINE");
+    }
+
+    @Test
+    void aDisconnectedBusyCourierIsLeftAlone() {
+        offers.accept(offer.assignmentId(), courier);
+
+        OfferService.Disconnect d = offers.disconnected(courier);
+
+        assertThat(d.wentOffline()).isFalse();
+        assertThat(List.of(f.courierStatus(courier), f.assignmentStatus(offer.assignmentId())))
+                .containsExactly("BUSY", "ACCEPTED");
+    }
+
+    @Test
+    void aDisconnectForAnUnknownCourierDoesNothing() {
+        assertThat(offers.disconnected(UUID.randomUUID()).wentOffline()).isFalse();
+    }
+
     /** Pretends the offer was made {@code age} ago. */
     void backdate(long assignmentId, Duration age) {
         jdbc.update("UPDATE assignments SET offered_at = now() - ? * interval '1 second' WHERE id = ?",

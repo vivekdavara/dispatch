@@ -1,6 +1,8 @@
 package io.github.vivekdavara.dispatch.assignment;
 
 import io.github.vivekdavara.dispatch.config.DispatchProperties;
+import io.github.vivekdavara.dispatch.courier.Courier;
+import io.github.vivekdavara.dispatch.courier.CourierLocations;
 import io.github.vivekdavara.dispatch.courier.CourierRepository;
 import io.github.vivekdavara.dispatch.courier.CourierStatus;
 import io.github.vivekdavara.dispatch.order.OrderStatus;
@@ -42,15 +44,18 @@ public class OfferService {
 
     private final AssignmentRepository assignments;
     private final CourierRepository couriers;
+    private final CourierLocations locations;
     private final TransactionTemplate tx;
     private final Clock clock;
     private final Duration timeout;
     private final ApplicationEventPublisher events;
 
-    public OfferService(AssignmentRepository assignments, CourierRepository couriers, TransactionTemplate tx,
-                        Clock clock, DispatchProperties props, ApplicationEventPublisher events) {
+    public OfferService(AssignmentRepository assignments, CourierRepository couriers, CourierLocations locations,
+                        TransactionTemplate tx, Clock clock, DispatchProperties props,
+                        ApplicationEventPublisher events) {
         this.assignments = assignments;
         this.couriers = couriers;
+        this.locations = locations;
         this.tx = tx;
         this.clock = clock;
         this.timeout = props.offers().timeout();
@@ -153,6 +158,58 @@ public class OfferService {
             }
         } while (due.size() == EXPIRY_BATCH);
         return expired;
+    }
+
+    /** What {@link #disconnected} did: whether the courier went offline, and the offer it released, if any. */
+    public record Disconnect(boolean wentOffline, Optional<Assignment> released) {
+        static final Disconnect NOTHING = new Disconnect(false, Optional.empty());
+    }
+
+    /**
+     * The courier's socket closed and they didn't reconnect within the grace period: they can't be reached, so
+     * stop offering them work. In one transaction: an offer they hold is released (assignment EXPIRED, order back
+     * to PENDING, so it's re-offered now instead of after the full timeout) and the courier goes OFFLINE straight
+     * from OFFERED, so no pass can offer them something in between. An AVAILABLE courier just goes OFFLINE. A
+     * BUSY courier is left alone: they're mid-delivery and report pickup and delivery over HTTP.
+     *
+     * <p>If an answer lands at the same moment, its compare-and-set and ours race on the same rows; whoever loses
+     * changes nothing, and the courier is left for the normal paths (the app sets itself AVAILABLE on reconnect).
+     */
+    public Disconnect disconnected(UUID courierId) {
+        Instant now = clock.instant();
+        Optional<Courier> courier = couriers.find(courierId);
+        if (courier.isEmpty()) {
+            return Disconnect.NOTHING;
+        }
+        Disconnect d = tx.execute(status -> {
+            CourierStatus current = couriers.find(courierId).map(Courier::status).orElse(CourierStatus.OFFLINE);
+            return switch (current) {
+                case OFFERED -> {
+                    Optional<Assignment> open = assignments.openOfferFor(courierId)
+                            .flatMap(a -> assignments.transition(a.id(), courierId, AssignmentStatus.OFFERED,
+                                    AssignmentStatus.EXPIRED, now));
+                    open.ifPresent(a -> {
+                        follow(assignments.moveOrder(a.orderId(), OrderStatus.OFFERED, OrderStatus.PENDING, now),
+                                a, "order");
+                        follow(couriers.transition(courierId, CourierStatus.OFFERED, CourierStatus.OFFLINE, now),
+                                a, "courier");
+                    });
+                    yield new Disconnect(open.isPresent(), open);
+                }
+                case AVAILABLE -> new Disconnect(
+                        couriers.transition(courierId, CourierStatus.AVAILABLE, CourierStatus.OFFLINE, now),
+                        Optional.empty());
+                case BUSY, OFFLINE -> Disconnect.NOTHING;
+            };
+        });
+        if (d.wentOffline()) {
+            locations.remove(courier.get().zoneId(), courierId); // a courier's zone never changes
+        }
+        d.released().ifPresent(a -> {
+            events.publishEvent(new OfferClosed(a));
+            events.publishEvent(new DispatchNeeded(a.zoneId(), DispatchNeeded.Reason.COURIER_DISCONNECTED));
+        });
+        return d;
     }
 
     /**

@@ -15,6 +15,8 @@ public record DispatchNeeded(String zoneId, Reason reason) {
         OFFER_DECLINED,
         /** An offer timed out: the same, for an unanswered offer. */
         OFFER_EXPIRED,
+        /** A courier holding an offer lost their socket and didn't come back in time: the order is waiting again. */
+        COURIER_DISCONNECTED,
         /** A delivery finished and the courier is free. */
         DELIVERED,
         /** The periodic sweep found pending orders (covers couriers moving into range, which sends no event). */

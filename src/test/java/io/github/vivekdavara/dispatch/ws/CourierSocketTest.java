@@ -41,6 +41,7 @@ import org.springframework.web.socket.handler.TextWebSocketHandler;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
         "dispatch.loop.enabled=true",
         "dispatch.offers.timeout=3s",
+        "dispatch.sockets.reconnect-grace=500ms",
         "dispatch.loop.expiry-interval=100ms",
         "dispatch.loop.sweep-interval=1s"})
 @DirtiesContext
@@ -253,6 +254,73 @@ class CourierSocketTest {
     }
 
     @Test
+    void aCourierWhoDropsMidOfferAndStaysGoneLosesItToTheNextCourierAfterTheGrace() throws Exception {
+        UUID near = f.availableCourier(Fixtures.north(200), MINUTE);
+        UUID far = f.availableCourier(Fixtures.north(1_500), MINUTE);
+        Client nearApp = connect(near);
+        Client farApp = connect(far);
+        UUID order = createOrder();
+        long first = nearApp.next("offer").path("assignmentId").asLong();
+
+        nearApp.session.close(); // and never comes back; the grace here is 500 ms, the offer timeout 3 s
+
+        assertThat(farApp.next("offer").path("orderId").asText()).isEqualTo(order.toString());
+        // Released by the disconnect, not by the timeout: only the disconnect takes the courier offline.
+        assertThat(f.assignmentStatus(first)).isEqualTo("EXPIRED");
+        assertThat(f.courierStatus(near)).isEqualTo("OFFLINE");
+        assertThat(redis.hasKey(CourierLocations.seenKey(near))).isFalse();
+    }
+
+    @Test
+    void aCourierWhoReconnectsWithinTheGraceKeepsTheOffer() throws Exception {
+        UUID courier = f.availableCourier(Fixtures.north(300), MINUTE);
+        Client first = connect(courier);
+        UUID order = createOrder();
+        long assignment = first.next("offer").path("assignmentId").asLong();
+        first.session.close();
+        awaitDisconnected(courier);
+
+        Client second = connect(courier);
+        assertThat(second.next("offer").path("assignmentId").asLong()).isEqualTo(assignment);
+        Thread.sleep(1_000); // past the grace period
+
+        assertThat(f.courierStatus(courier)).isEqualTo("OFFERED");
+        second.send("accept", assignment);
+        second.next("accepted");
+        assertThat(f.orderStatus(order)).isEqualTo("ASSIGNED");
+    }
+
+    @Test
+    void anIdleCourierWhoDropsIsTakenOfflineAfterTheGrace() throws Exception {
+        UUID courier = f.availableCourier(Fixtures.north(300), MINUTE);
+        Client app = connect(courier);
+        app.next("hello");
+
+        app.session.close();
+
+        awaitStatus(courier, "OFFLINE");
+        createOrder();
+        Thread.sleep(300);
+        assertThat(f.courierStatus(courier)).isEqualTo("OFFLINE"); // not offered anything while gone
+    }
+
+    @Test
+    void aBusyCourierWhoDropsIsLeftToFinishTheDelivery() throws Exception {
+        UUID courier = f.availableCourier(Fixtures.north(300), MINUTE);
+        Client app = connect(courier);
+        createOrder();
+        long assignment = app.next("offer").path("assignmentId").asLong();
+        app.send("accept", assignment);
+        app.next("accepted");
+
+        app.session.close();
+        Thread.sleep(1_000); // past the grace period
+
+        assertThat(f.courierStatus(courier)).isEqualTo("BUSY");
+        assertThat(f.assignmentStatus(assignment)).isEqualTo("ACCEPTED");
+    }
+
+    @Test
     void aSecondConnectionReplacesTheFirst() throws Exception {
         UUID courier = f.availableCourier(Fixtures.north(300), MINUTE);
         Client old = connect(courier);
@@ -288,6 +356,14 @@ class CourierSocketTest {
         assertThat(app.next("error").path("status").asInt()).isEqualTo(404);
 
         assertThat(app.session.isOpen()).isTrue();
+    }
+
+    void awaitStatus(UUID courier, String status) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!f.courierStatus(courier).equals(status)) {
+            assertThat(System.nanoTime()).as("courier %s to become %s", courier, status).isLessThan(deadline);
+            Thread.sleep(20);
+        }
     }
 
     void awaitDisconnected(UUID courier) throws InterruptedException {
