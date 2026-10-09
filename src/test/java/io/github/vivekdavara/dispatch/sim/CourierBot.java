@@ -158,8 +158,7 @@ final class CourierBot implements WebSocket.Listener {
             case "hello" -> {
                 if (reconnecting) {
                     reconnecting = false;
-                    // A long outage gets the courier taken offline; come back. 409 (offered or busy) is fine.
-                    api.callAsync("PUT", "/api/v1/couriers/" + courierId + "/status", Map.of("status", "AVAILABLE"));
+                    timers.execute(this::comeBackOnline);
                 }
             }
             case "offer" -> {
@@ -207,6 +206,21 @@ final class CourierBot implements WebSocket.Listener {
                 rec.note("courier " + index + " got " + m);
             }
         }
+    }
+
+    /**
+     * After a reconnect: a drop longer than the server's grace got the courier taken offline, so go back online
+     * (as a real app would). A short drop leaves the status alone; 409 for an offered or busy courier is fine.
+     */
+    private void comeBackOnline() {
+        try {
+            if ("OFFLINE".equals(api.call("GET", "/api/v1/couriers/" + courierId, null).path("status").asText())) {
+                rec.takenOffline.increment();
+            }
+        } catch (RuntimeException e) {
+            rec.note("courier " + index + " status check after reconnect: " + e.getMessage());
+        }
+        api.callAsync("PUT", "/api/v1/couriers/" + courierId + "/status", Map.of("status", "AVAILABLE"));
     }
 
     private void answer(long assignmentId) {

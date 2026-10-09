@@ -44,6 +44,7 @@ final class Recorder {
     final LongAdder deliveryErrors = new LongAdder();
     final LongAdder drops = new LongAdder();
     final LongAdder reconnects = new LongAdder();
+    final LongAdder takenOffline = new LongAdder();
     final AtomicLong maxReplayLagNanos = new AtomicLong();
     /** The first few unexpected things, verbatim, so a report explains its own error counts. */
     private final Queue<String> notes = new ConcurrentLinkedQueue<>();

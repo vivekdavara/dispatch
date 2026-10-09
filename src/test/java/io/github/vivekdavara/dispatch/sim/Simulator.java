@@ -297,10 +297,14 @@ public final class Simulator {
         couriers.put("answerRetriesRejected", rec.answerRetriesRejected.sum());
         couriers.put("socketDrops", rec.drops.sum());
         couriers.put("reconnects", rec.reconnects.sum());
+        couriers.put("foundOfflineOnReconnect", rec.takenOffline.sum());
         couriers.put("socketErrors", rec.socketErrors.sum());
         couriers.put("sendsLostToDrops", rec.sendsLost.sum());
         couriers.put("deliveryErrors", rec.deliveryErrors.sum());
 
+        if (options.dbUrl() != null) {
+            orders.put("assignmentsByStatus", assignmentsByStatus());
+        }
         return new Report(options.label(), runId, startedAt, scenarioInfo, replay, orders, couriers,
                 LatencySummary.ofNanos(rec.sinceOrderSent(rec.firstOfferAt)), serverSideFirstOffer(),
                 LatencySummary.ofNanos(rec.sinceOrderSent(rec.acceptedAt)), serverMetrics(), zoneIds, rec.notes());
@@ -329,6 +333,28 @@ public final class Simulator {
             return null;
         }
         return LatencySummary.ofNanos(nanos.stream().mapToLong(Long::longValue).toArray());
+    }
+
+    /**
+     * Every assignment the run made, by outcome, from Postgres. EXPIRED counts both timeouts and offers released
+     * because their courier's socket stayed down past the grace (a disconnected courier never sees the release).
+     */
+    private Map<String, Long> assignmentsByStatus() {
+        Map<String, Long> byStatus = new LinkedHashMap<>();
+        try (Connection db = DriverManager.getConnection(options.dbUrl());
+             PreparedStatement q = db.prepareStatement("""
+                     SELECT a.status, count(*) FROM assignments a JOIN orders o ON o.id = a.order_id
+                      WHERE o.zone_id LIKE ? GROUP BY a.status ORDER BY a.status""")) {
+            q.setString(1, runId + "-z%");
+            try (ResultSet rs = q.executeQuery()) {
+                while (rs.next()) {
+                    byStatus.put(rs.getString(1), rs.getLong(2));
+                }
+            }
+        } catch (SQLException e) {
+            log("assignment counts unavailable: %s", e.getMessage());
+        }
+        return byStatus;
     }
 
     /** Engine pass counts and timings from {@code /actuator/metrics}; cumulative since the app started. */
