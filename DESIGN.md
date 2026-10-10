@@ -4,8 +4,9 @@ Dispatch is a backend that matches delivery orders to couriers in real time. A c
 finds the best available courier nearby, offers the order to that courier over a WebSocket, and reassigns it if the
 courier declines or doesn't answer in time.
 
-This document is the plan the code follows, and since day 4 it describes what's built: the matching rule, the
-engine, offers over WebSockets, failure handling, and the load simulator that measures it.
+This document is the plan the code followed, and as of v1.0.0 it describes what's built: the matching rule, the
+engine, offers over WebSockets, failure handling, and the load simulator that measures it. WALKTHROUGH.md has the
+same material as questions and answers.
 
 ## Goals and non-goals
 
@@ -146,7 +147,8 @@ constraint violation instead of silently double-assigning.
    `PriorityScore` itself so the rule has one definition.
 3. **For each order, find candidates.** `GEOSEARCH couriers:geo:{zone} FROMLONLAT … BYRADIUS 5 km ASC`, then one
    `MGET` of the `courier:seen:{id}` markers to drop stale couriers (and remove them from the GEO set); keep the
-   ones in the snapshot that haven't refused this order. No Postgres round trip.
+   ones in the snapshot that haven't refused this order. No Postgres round trip. An order every free courier has
+   refused is skipped without asking Redis (v1.0.0).
 4. **Rank** with `CourierRanking` (nearest, 50 m bands, longest idle, id).
 5. **Claim**, in one transaction:
    `UPDATE orders SET status='OFFERED' WHERE id=? AND status='PENDING'` (zero rows: another pass took the order,
@@ -156,6 +158,12 @@ constraint violation instead of silently double-assigning.
    taken meanwhile, roll back, and the order stays `PENDING`. A claimed courier leaves the snapshot, and **when the
    snapshot is empty the pass stops**: the rest of the backlog can't be served until a courier frees up, and that
    courier's event starts the next pass.
+6. **Next batch** (v1.0.0). If the whole batch went by and free couriers are left (every order in it was refused
+   by them or out of their range), read the next 200 after the last one, by keyset: `(created_at - tierBonus,
+   created_at, id) > (…the same for the batch's last order…)`, computed from that order's row, so it works even if
+   the order was claimed meanwhile. The pass ends at the end of the backlog. Before this, 200 orders nobody could
+   take at the front of the queue hid every order behind them; `BacklogPagingTest` (batch size 3) fails 4 of its 5
+   tests on the old pass. The per-order pass below is kept exactly as measured, one batch.
 
 The snapshot can go stale during a pass (a courier goes offline, or the manual endpoint runs a pass alongside).
 That's safe: the claim is still a compare-and-set, so a stale entry costs one `UPDATE` that matches nothing and a
@@ -223,6 +231,7 @@ A pass over a zone starts on any of:
 | `COURIER_AVAILABLE` | `CourierService.setStatus` | a courier came online |
 | `OFFER_DECLINED`, `OFFER_EXPIRED` | `OfferService` | the order is waiting again, and the courier is free |
 | `DELIVERED` | `OfferService.delivered` | the courier is free |
+| `COURIER_DISCONNECTED` | `OfferService.disconnected` (an offer was released) | the order is waiting again |
 | `SWEEP` (every 5 s) | `DispatchLoop` | covers what sends no event, chiefly a courier driving into range |
 
 Events are Spring application events (`DispatchNeeded`), published **after** the change commits so the pass sees
@@ -274,7 +283,11 @@ Plain WebSocket with JSON messages (no STOMP/SockJS: four message types don't ne
   are refused by Spring's default same-origin check.
 - Offers are sent from engine threads and replies from the socket's thread, so each session is wrapped in
   `ConcurrentWebSocketSessionDecorator` (a raw session can't be written by two threads at once), with a 5 s send
-  limit and a 64 KB buffer so one slow phone can't stall a pass.
+  limit and a 64 KB buffer so one slow phone can't stall a pass. A socket over either limit makes the decorator
+  throw `SessionLimitExceededException` on the sending thread; since v1.0.0 the hub catches it (before, it escaped
+  through the event publish, ending the engine pass or failing an answer that had already committed) and closes
+  the session on a virtual thread, because closing a stuck connection can block too. That starts the courier's
+  reconnect grace (`SlowCourierSocketTest`).
 - The HTTP endpoints `POST /api/v1/assignments/{id}/accept|decline` do the same as the socket messages, for
   clients without a socket, and `GET /api/v1/couriers/{id}/offer` (v1.0.0) returns the open offer as the same
   `offer` message (204 if there's none), so such a client can poll for work.
@@ -343,7 +356,9 @@ Check constraints keep coordinates in range and statuses to the known values.
 
 - **Offer timeout** (D3): an offer not answered in 30 s (`dispatch.offers.timeout`) expires within the next 1 s
   tick; the order goes back to `PENDING` and is re-offered at once, the courier goes back to `AVAILABLE` and is
-  skipped for that order.
+  skipped for that order. An offer that can't be expired (its order or courier not in the state the offer
+  implies, which no code path produces) is logged and left out of the rest of that tick (v1.0.0); before, being the
+  oldest, it came first in every tick and stopped every other expiry.
 - **Courier socket drops** (D4): reconnect within 10 s and nothing changes (the open offer is resent); stay away
   longer and the held offer goes to the next courier and the courier goes offline (see "Reconnect grace").
 - **Courier goes silent** (D2): a courier whose location goes stale (no ping for 60 s) drops out of candidates (the
@@ -354,10 +369,18 @@ Check constraints keep coordinates in range and statuses to the known values.
 - **A failing pass** (D3): logged; the zone stays schedulable and the next event or sweep retries.
 - **Redis loss:** positions are soft state. Couriers resend location every few seconds, so Redis refills itself.
 
-Known gaps: an order every nearby courier has declined stays `PENDING` until a new courier comes into range (no
-cap on attempts or escalation). A courier whose socket is down but who finishes a delivery over HTTP becomes
-`AVAILABLE` and can be offered work they won't see until they reconnect; that offer falls back on the 30 s
-timeout. Presence lives in one process's memory, so a second app instance would need it in Redis.
+Known gaps (also in the README's limitations):
+
+- An order every nearby courier has declined stays `PENDING` until a new courier comes into range: no cap on
+  attempts and no escalation. Since v1.0.0 it can't hide the orders behind it.
+- A courier whose socket is down but who finishes a delivery over HTTP becomes `AVAILABLE` and can be offered work
+  they won't see until they reconnect or poll `GET /couriers/{id}/offer`; that offer falls back on the 30 s timeout.
+- No heartbeats on the socket: a half-open connection looks connected until TCP gives up, and offers sent into it
+  expire after 30 s.
+- Presence (sockets and grace timers) and the one-pass-per-zone rule live in one process's memory, so a second app
+  instance would need presence in Redis and an owner per zone.
+- No authentication (couriers name themselves in the body), and no endpoint cancels an order, although `CANCELLED`
+  is in the schema.
 
 ## Measurement (D4): the load simulator
 
