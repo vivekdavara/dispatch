@@ -13,7 +13,7 @@
 
     <groupId>io.github.vivekdavara</groupId>
     <artifactId>dispatch</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>1.0.0</version>
     <name>dispatch</name>
     <description>Real-time order/courier matching backend</description>
 
@@ -70,6 +70,8 @@
     </dependencies>
 
     <build>
+        <!-- target/dispatch.jar whatever the version, so scripts don't have to know it. -->
+        <finalName>${project.artifactId}</finalName>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>

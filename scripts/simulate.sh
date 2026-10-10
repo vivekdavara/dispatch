@@ -29,7 +29,7 @@ createdb -h localhost "${DB}"
 mvn -q -B -DskipTests package dependency:build-classpath \
     -Dmdep.outputFile="${OUT}/classpath.txt" -Dmdep.includeScope=test
 
-"${JAVA}" -jar target/dispatch-0.1.0-SNAPSHOT.jar --server.port="${PORT}" \
+"${JAVA}" -jar target/dispatch.jar --server.port="${PORT}" \
     --spring.datasource.url="jdbc:postgresql://localhost:5432/${DB}" "$@" > "${OUT}/app-${LABEL}.log" 2>&1 &
 APP=$!
 trap 'kill ${APP} 2>/dev/null || true; wait ${APP} 2>/dev/null || true' EXIT
