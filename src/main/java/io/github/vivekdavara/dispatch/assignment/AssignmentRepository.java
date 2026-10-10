@@ -218,9 +218,13 @@ public class AssignmentRepository {
                 ROW, courierId).stream().findFirst();
     }
 
-    /** Up to {@code limit} offers still OFFERED that were made before {@code cutoff}, oldest first. */
-    public List<Assignment> offeredBefore(Instant cutoff, int limit) {
+    /**
+     * Up to {@code limit} offers still OFFERED that were made before {@code cutoff}, oldest first, leaving out the
+     * ids in {@code skip}.
+     */
+    public List<Assignment> offeredBefore(Instant cutoff, List<Long> skip, int limit) {
         return jdbc.query("SELECT " + COLUMNS + " FROM assignments WHERE status = 'OFFERED' AND offered_at < ?"
-                + " ORDER BY offered_at LIMIT ?", ROW, Timestamp.from(cutoff), limit);
+                + " AND NOT (id = ANY (?)) ORDER BY offered_at LIMIT ?", ROW, Timestamp.from(cutoff),
+                skip.toArray(Long[]::new), limit);
     }
 }

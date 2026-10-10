@@ -227,6 +227,29 @@ class OfferServiceTest {
     }
 
     @Test
+    void anOfferThatCantBeExpiredDoesNotHoldUpTheOthers() {
+        UUID otherCourier = f.availableCourier(Fixtures.north(600), MINUTE);
+        UUID otherOrder = f.order(OrderTier.STANDARD, MINUTE);
+        Offer other = engine.dispatchZone(f.zoneId()).get(0);
+        assertThat(other.courierId()).isEqualTo(otherCourier);
+        // The oldest overdue offer, with its order moved behind the engine's back: no code path does this, but if
+        // a row ever got into this state, expiring it would fail every time, and it's first in every batch.
+        backdate(offer.assignmentId(), Duration.ofMinutes(5));
+        backdate(other.assignmentId(), Duration.ofMinutes(1));
+        jdbc.update("UPDATE orders SET status = 'CANCELLED' WHERE id = ?", order);
+
+        List<Assignment> expired = offers.expireDue();
+
+        assertThat(expired).extracting(Assignment::id).contains(other.assignmentId())
+                .doesNotContain(offer.assignmentId());
+        assertThat(f.orderStatus(otherOrder)).isEqualTo("PENDING");
+        assertThat(f.courierStatus(otherCourier)).isEqualTo("AVAILABLE");
+        // The bad one was rolled back whole, and is tried again (and logged) on every tick.
+        assertThat(f.assignmentStatus(offer.assignmentId())).isEqualTo("OFFERED");
+        assertThat(f.courierStatus(courier)).isEqualTo("OFFERED");
+    }
+
+    @Test
     void expiresAtIsTheOfferTimePlusTheTimeout() {
         assertThat(offers.expiresAt(offer.offeredAt())).isEqualTo(offer.offeredAt().plusSeconds(30));
     }

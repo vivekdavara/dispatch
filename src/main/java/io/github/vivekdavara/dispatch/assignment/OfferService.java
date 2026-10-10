@@ -14,6 +14,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -39,6 +41,8 @@ import org.springframework.transaction.support.TransactionTemplate;
  */
 @Service
 public class OfferService {
+
+    private static final Logger log = LoggerFactory.getLogger(OfferService.class);
 
     static final int EXPIRY_BATCH = 500;
 
@@ -146,15 +150,26 @@ public class OfferService {
      * Expires every offer older than the timeout, in batches, and returns the ones this call expired. An offer
      * answered meanwhile is skipped: the assignment compare-and-set lets exactly one of accept, decline and expiry
      * win.
+     *
+     * <p>An offer whose order or courier isn't in the state the offer implies can't be expired (its transaction
+     * rolls back). No code path leaves rows like that, but if one did, it would be the oldest overdue offer, first
+     * in every batch: it's logged and left out of this call's later batches, so it can't keep every other offer
+     * from expiring. The next tick tries it again (and logs it again) until someone fixes the row.
      */
     public List<Assignment> expireDue() {
         Instant now = clock.instant();
         List<Assignment> expired = new ArrayList<>();
+        List<Long> stuck = new ArrayList<>();
         List<Assignment> due;
         do {
-            due = assignments.offeredBefore(now.minus(timeout), EXPIRY_BATCH);
+            due = assignments.offeredBefore(now.minus(timeout), stuck, EXPIRY_BATCH);
             for (Assignment a : due) {
-                release(a.id(), a.courierId(), AssignmentStatus.EXPIRED, now).ifPresent(expired::add);
+                try {
+                    release(a.id(), a.courierId(), AssignmentStatus.EXPIRED, now).ifPresent(expired::add);
+                } catch (IllegalStateException e) {
+                    stuck.add(a.id());
+                    log.error("can't expire offer {}: {}", a.id(), e.getMessage());
+                }
             }
         } while (due.size() == EXPIRY_BATCH);
         return expired;
