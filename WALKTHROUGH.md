@@ -274,5 +274,98 @@ can do the same (OkHttp would refuse that response as well), so this was a produ
 two 50K runs it hit 3 of the bots' 80 reconnects, which happen mid-run on well-used connections. The fix is one setting
 (`server.tomcat.max-keep-alive-requests: -1`), and
 [`KeepAliveUpgradeTest`](src/test/java/io/github/vivekdavara/dispatch/ws/KeepAliveUpgradeTest.java) makes it
-deterministic: 99 `HEAD` requests and then the upgrade on one raw socket. The lesson was to make a flaky failure say
-what happened before trying to fix it.
+deterministic: 99 `HEAD` requests and then the upgrade on one raw socket. Then the old reports turned out to have it
+too: four of day 4's ten runs had one refused reconnect each, and the README had said "0 socket errors" for all ten
+(corrected now). The lessons: make a flaky failure say what happened before trying to fix it, and read every counter
+in a report, not just the ones the table shows.
+
+## Measurement
+
+**How did you measure assignment latency?** With a load simulator
+([`src/test/.../sim/`](src/test/java/io/github/vivekdavara/dispatch/sim/Simulator.java)) that drives the running jar
+only through its public interfaces: HTTP for orders, pings, pickup and delivery, and one real WebSocket per courier.
+The scenario is seeded, so a before/after pair replays identical events: 10,000 orders (a 60 s rush at 3×, 20%
+priority, 5% sent twice with the same key) and 40,000 pings over 5 minutes in 4 zones, plus 40 injected socket
+drops. Bots answer in 0.2 to 1 s, decline 10% and send 5% of answers twice. *First offer* is from just before the
+POST is sent to the first offer for that order arriving on any courier's socket, both read from `System.nanoTime()`
+in the simulator's JVM; percentiles are exact nearest-rank over all 10,000 orders.
+
+**Why join the timestamps by order id at the end?** Because the offer can reach a courier's socket before the
+customer's POST has its response: the pass runs as soon as the insert commits. Timing per request would miss those
+or count them negative ([`sim/Recorder.java`](src/test/java/io/github/vivekdavara/dispatch/sim/Recorder.java)).
+
+**What was the optimisation, and what did it buy?** The day-2 pass asked Postgres, once per pending order, which
+nearby couriers were free, and walked the whole 200-order batch even when nobody was. The snapshot pass reads the
+zone's free couriers once and stops when they're all taken. Mean pass time fell from 15.7 to 2.0 ms (standard) and
+from 51.1 to 2.5 ms (overload); p99 first offer from 26.8 to 16.9 s and from 105.6 to 72.2 s; the worst case from
+55.1 to 20.4 s and from 166.7 to 78.3 s. With a courier free, the median didn't move (7.5 vs 7.6 ms): the query was
+never the bottleneck for an order that finds a courier at once.
+
+**Then why did the overload median get worse (14.2 to 18.4 s)?** Because the old pass was breaking the rule. It
+looked couriers up live, so a courier freed while a long pass was on its 150th order went to the 150th order, ahead
+of the 149 that outranked it. The simulator counts these priority inversions from Postgres: 522,301 pairs with the old
+pass in overload, 82 with the snapshot pass. Strict priority order behaves like first come, first served, which
+shortens the tail and raises the median, while the old, effectively random order let some new orders jump the queue.
+Split by tier, PRIORITY orders went from a 4.6 s median to 50 ms under overload, which is what the 10-minute bonus is
+for; the mean time to an accepted courier didn't change (24.9 s in both).
+
+**How do you know the differences aren't noise?** Same seed, same build, one property flipped
+(`dispatch.assignment.candidate-snapshot`), and two rounds run in the order before, after, after, before so drift
+can't favour either side; every percentile in seconds agreed within 3% across rounds, except the old pass's
+standard max (55.1 vs 65.9 s). The release check later re-ran the default pass six more times on three more builds,
+and across all of them the p95, p99 and mean first offer stayed within 1.4% of each other. `CandidateSnapshotTest` shows
+both passes make identical offers on a static zone from eight seeds, so the difference under load comes from
+behaviour while things change, not from a different rule.
+
+**Why are the p95s in seconds?** The fleet is short on purpose: `standard` is about 20% short during the rush and
+`overload` about half. Those seconds are orders queueing for a free courier, which no engine change can remove. The
+engine's own share is the server-side median, `created_at` to `offered_at` in Postgres: 3.5 to 4.6 ms.
+
+**What isn't measured?** Maximum throughput (the load is fixed; nothing sweeps it until latency breaks), more than
+one app instance, network latency between phones and server, and realistic delivery times (bots deliver in seconds).
+The app, Postgres, Redis and the simulator share one laptop, so absolute numbers include their contention; the
+comparisons are what the numbers are for.
+
+## Scaling and what's missing
+
+**How would you run more than one instance?** Three things are per-process today. Presence and the grace timers live
+in memory, so they'd move to Redis (a key per connected courier with a TTL refreshed by the socket's instance). The
+one-pass-per-zone rule lives in `PassScheduler`'s map, so zones would need an owner: a Postgres advisory lock per
+zone held for the pass, or zones partitioned across instances; correctness doesn't depend on it (the claims are
+compare-and-sets), efficiency does. And events are in-process, so "zone needs a pass" and "push this offer to the
+instance holding this courier's socket" would go over a shared channel (Redis pub/sub, Postgres `LISTEN/NOTIFY`, or
+Kafka at scale).
+
+**What breaks first at 10× the load?** Not measured, so this is a hypothesis to test with a throughput sweep:
+Postgres write load (every offer and every answer is a short transaction updating two or three rows), then serial
+passes in a very busy zone (split the zone), then Redis `GEOSEARCH` calls (one per examined order per pass, cheap).
+
+**What's missing before production?** Authentication: couriers name themselves in the request body
+([`AssignmentController`](src/main/java/io/github/vivekdavara/dispatch/assignment/AssignmentController.java)), so any
+client can act for any courier id. Order cancellation: `CANCELLED` exists in the schema and state machine, but no
+endpoint sets it. Escalation for orders nobody takes. Heartbeats on the socket: a half-open TCP connection looks
+connected until TCP gives up, and offers sent into it expire after 30 s. Presence in Redis for a second instance.
+Rate limits, auth on the actuator endpoints, and alerting.
+
+**What would you do differently?** Put the order's details on the `Offer` event, so a push doesn't read the order
+back from Postgres on the engine thread, and do the push on its own executor. Split `/health` into liveness and
+readiness, so a Redis outage doesn't take order intake down with it. And write the simulator first: it found three
+real bugs that no unit test had (retried answers refused, the priority inversions, and the keep-alive upgrade).
+
+## Where to start reading
+
+1. [`DESIGN.md`](DESIGN.md): "The assignment rule", "Concurrency", "One engine pass, step by step".
+2. [`domain/CourierRanking.java`](src/main/java/io/github/vivekdavara/dispatch/domain/CourierRanking.java) and
+   [`domain/PriorityScore.java`](src/main/java/io/github/vivekdavara/dispatch/domain/PriorityScore.java): the rule.
+3. [`assignment/AssignmentEngine.java`](src/main/java/io/github/vivekdavara/dispatch/assignment/AssignmentEngine.java):
+   `snapshotPass`, `offerToBest`, `claim`.
+4. [`assignment/OfferService.java`](src/main/java/io/github/vivekdavara/dispatch/assignment/OfferService.java):
+   `accept`, `release`, `expireDue`, `disconnected`.
+5. [`assignment/PassScheduler.java`](src/main/java/io/github/vivekdavara/dispatch/assignment/PassScheduler.java), then
+   [`DispatchLoop.java`](src/main/java/io/github/vivekdavara/dispatch/assignment/DispatchLoop.java).
+6. [`ws/CourierSocketHandler.java`](src/main/java/io/github/vivekdavara/dispatch/ws/CourierSocketHandler.java):
+   connect, close, `graceEnded`, `send`.
+7. [`order/OrderService.java`](src/main/java/io/github/vivekdavara/dispatch/order/OrderService.java) and
+   [`V1__init.sql`](src/main/resources/db/migration/V1__init.sql).
+8. Tests that make the claims: `ConcurrentDispatchTest`, `OfferServiceTest` (the races), `PassSchedulerTest`
+   (`noRequestIsLost`), `CandidateSnapshotTest`, `BacklogPagingTest`, `KeepAliveUpgradeTest`, `SimulatorSmokeTest`.
