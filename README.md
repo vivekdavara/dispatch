@@ -15,9 +15,10 @@ come from it.
 > **Status: v1.0.0, complete.** Design, schema and the assignment rule (day 1); idempotent order intake, courier
 > positions in Redis GEO and the assignment engine (day 2); offers over a WebSocket, accept/decline, 30 s timeouts
 > with reassignment, pickup and delivery, and an event-driven loop (day 3); the load simulator, one measured engine
-> optimisation, and courier disconnects and client retries (day 4); a final review that fixed three bugs and added
-> the HTTP open-offer endpoint, a release check of the numbers, and the docs (day 5). [DESIGN.md](DESIGN.md) is the
-> full design; [WALKTHROUGH.md](WALKTHROUGH.md) has the questions an interviewer would ask, answered from the code.
+> optimisation, and courier disconnects and client retries (day 4); a final review that fixed four bugs (listed under
+> "Failure handling") and added the HTTP open-offer endpoint, a release check of the numbers, and the docs (day 5).
+> [DESIGN.md](DESIGN.md) is the full design; [WALKTHROUGH.md](WALKTHROUGH.md) has the questions an interviewer would
+> ask, answered from the code.
 
 ## Architecture
 
