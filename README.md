@@ -230,7 +230,7 @@ Override with `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DAT
 
 ## Tests
 
-238 tests (`JAVA_HOME=/opt/homebrew/opt/openjdk@21 mvn test`, about a minute, 25 s of it the simulator smoke
+239 tests (`JAVA_HOME=/opt/homebrew/opt/openjdk@21 mvn test`, about a minute, 25 s of it the simulator smoke
 test); everything except the pure-function, scheduler, simulator-unit and mocked-health suites runs against real
 Postgres and Redis. Most tests turn the event loop off (`src/test/resources/config/application.yml`) to drive the
 engine by hand; the loop, socket, end-to-end and simulator suites turn it on in their own context.
@@ -247,7 +247,7 @@ engine by hand; the loop, socket, end-to-end and simulator suites turn it on in 
 | `AssignmentEngineTest` | nearest first, the 50 m idle-time tie-break, stale/offline/busy couriers skipped, 5 km limit, priority vs waiting time |
 | `ConcurrentDispatchTest` | 8 engine passes racing on one zone: every courier and order in at most one offer (5 repetitions) |
 | `ZoneApiTest` | zone upsert and the whole day-2 flow over HTTP |
-| `OfferServiceTest` | accept, decline, expiry; decliners never re-offered that order; accept racing decline and accept racing expiry always have one winner (5 repetitions each); repeated answers are harmless; an offer that can't be expired doesn't hold up the others; a disconnect releases the held offer and takes the courier offline in one step |
+| `OfferServiceTest` | accept, decline, expiry; decliners never re-offered that order; accept racing decline and accept racing expiry always have one winner (5 repetitions each); repeated answers are harmless; offers that can't be expired (one, or a full batch of 500) don't hold up the others or trap the tick; a disconnect releases the held offer and takes the courier offline in one step |
 | `OfferTimestampTest` | with a clock that ticks on every read, two offers from one pass carry their own claim times |
 | `CandidateSnapshotTest` | the snapshot pass makes exactly the per-order pass's offers on identical zones from eight seeds; no free courier means no orders examined; the pass stops when free couriers run out |
 | `BacklogPagingTest` | with a batch of 3: orders every free courier refused, or out of their range, don't hide the orders behind them; a pass that can serve nothing reads the backlog once and stops; no next batch once the couriers are taken; priority order holds across batches |

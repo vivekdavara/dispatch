@@ -241,7 +241,8 @@ offers, not the history) in batches of 500 and releases each one with the same c
 decline. Each expiry publishes an event, so the order is re-offered at once: an unanswered offer ends at most
 about 31 s after it was made. Since v1.0.0, an offer whose rows are in an impossible state is logged and skipped
 instead of ending the tick; before, being the oldest, it would have come first in every tick and stopped all
-expiries.
+expiries. `OfferServiceTest` covers one such offer and a full batch of 500 of them; without the exclusion the
+tick retried the same 500 until it was killed.
 
 **What if Redis goes down?** Matching stops: passes throw, are logged, and retry on the next event or sweep. Order
 intake keeps working (it's Postgres only), and nothing in Redis needs saving: positions are soft state, couriers
@@ -326,7 +327,7 @@ one app instance, network latency between phones and server, and realistic deliv
 The app, Postgres, Redis and the simulator share one laptop, so absolute numbers include their contention; the
 comparisons are what the numbers are for.
 
-**How is it tested, and what runs in CI?** 238 tests, nearly all against real Postgres and Redis rather than mocks,
+**How is it tested, and what runs in CI?** 239 tests, nearly all against real Postgres and Redis rather than mocks,
 because the interesting bugs live in the SQL and the races: compare-and-sets, the partial indexes, `ON CONFLICT`,
 the keyset. GitHub Actions starts Postgres 14 and Redis 8 as service containers and runs `mvn -B verify` on every
 push, about a minute and a half ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). That includes the
