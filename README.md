@@ -216,6 +216,13 @@ then `/pickup` and `/deliver` the same way. Sending the order request again retu
 `Idempotent-Replayed: true`; changing its body under the same key returns a 409 `application/problem+json`.
 `POST /api/v1/zones/{id}/dispatch` still runs a pass by hand.
 
+Every command in this section was run against the v1.0.0 jar on 2026-10-10, with no socket at all (a single hand
+run, not a measurement). The courier was `OFFERED` as soon as the order was created (10.7 ms from the order's
+`createdAt` to the offer's `offeredAt`); `GET …/offer` returned it with `expiresAt` 30 s later; accept, pickup and
+deliver each returned the assignment, ending `COMPLETED`; `…/offer` then answered 204, an unknown courier's 404; the
+repeated POST answered 200 with the order now `DELIVERED` (a replay returns the order as it is now), and the changed
+body 409.
+
 Configuration: the app uses `jdbc:postgresql://localhost:5432/dispatch` as your OS user and Redis on 6381.
 Override with `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD` and
 `SPRING_DATA_REDIS_PORT`; CI does this with service containers.
