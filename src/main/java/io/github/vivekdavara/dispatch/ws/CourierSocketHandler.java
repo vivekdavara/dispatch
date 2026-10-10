@@ -33,6 +33,7 @@ import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
+import org.springframework.web.socket.handler.SessionLimitExceededException;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 /**
@@ -256,9 +257,25 @@ public class CourierSocketHandler extends TextWebSocketHandler {
     private void send(WebSocketSession session, Object message) {
         try {
             session.sendMessage(new TextMessage(json.writeValueAsString(message)));
+        } catch (SessionLimitExceededException e) {
+            // A send has been stuck past the time limit, or the buffer behind it is full: this connection isn't
+            // keeping up. Sends run on engine threads and right after answers commit, so this mustn't escape
+            // (it would end the pass, or fail an answer that already took effect). Close the session, which
+            // starts the courier's reconnect grace; off this thread, because closing a stuck connection can block
+            // too. The offer stands, and expires if they don't come back.
+            log.info("courier socket {} can't keep up ({}); closing it", session.getId(), e.getMessage());
+            Thread.ofVirtual().start(() -> closeQuietly(session, e.getStatus()));
         } catch (IOException | IllegalStateException e) {
             // A dead or slow socket. The offer stands and will expire if unanswered; nothing else to do here.
             log.debug("couldn't send to courier socket {}: {}", session.getId(), e.getMessage());
+        }
+    }
+
+    private static void closeQuietly(WebSocketSession session, CloseStatus status) {
+        try {
+            session.close(status);
+        } catch (IOException | RuntimeException e) {
+            log.debug("couldn't close courier socket {}: {}", session.getId(), e.getMessage());
         }
     }
 
