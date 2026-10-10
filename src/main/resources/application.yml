@@ -1,5 +1,11 @@
 server:
   port: ${DISPATCH_PORT:8101}
+  tomcat:
+    # Tomcat ends a keep-alive connection after 100 requests by adding "Connection: close" to the 100th response,
+    # even when that response is a WebSocket upgrade, which then says both "upgrade" and "close"; strict clients
+    # (the JDK's, OkHttp) refuse that handshake. No limit here; idle connections still close on Tomcat's
+    # keep-alive timeout. KeepAliveUpgradeTest sends the upgrade as the 100th request.
+    max-keep-alive-requests: -1
 
 spring:
   application:
