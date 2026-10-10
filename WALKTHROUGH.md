@@ -313,8 +313,8 @@ for; the mean time to an accepted courier didn't change (24.9 s in both).
 (`dispatch.assignment.candidate-snapshot`), and two rounds run in the order before, after, after, before so drift
 can't favour either side; every percentile in seconds agreed within 3% across rounds, except the old pass's
 standard max (55.1 vs 65.9 s). The release check later re-ran the default pass six more times on three more builds,
-and across all of them the p95, p99 and mean first offer stayed within 1.4% of each other. `CandidateSnapshotTest` shows
-both passes make identical offers on a static zone from eight seeds, so the difference under load comes from
+and across all of them the p95, p99 and mean first offer stayed within 1.4% of each other. `CandidateSnapshotTest`
+shows both passes make identical offers on a static zone from eight seeds, so the difference under load comes from
 behaviour while things change, not from a different rule.
 
 **Why are the p95s in seconds?** The fleet is short on purpose: `standard` is about 20% short during the rush and
@@ -325,6 +325,13 @@ engine's own share is the server-side median, `created_at` to `offered_at` in Po
 one app instance, network latency between phones and server, and realistic delivery times (bots deliver in seconds).
 The app, Postgres, Redis and the simulator share one laptop, so absolute numbers include their contention; the
 comparisons are what the numbers are for.
+
+**How is it tested, and what runs in CI?** 238 tests, nearly all against real Postgres and Redis rather than mocks,
+because the interesting bugs live in the SQL and the races: compare-and-sets, the partial indexes, `ON CONFLICT`,
+the keyset. GitHub Actions starts Postgres 14 and Redis 8 as service containers and runs `mvn -B verify` on every
+push, about a minute and a half ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). That includes the
+simulator's 1,000-event scenario against a real embedded server (`SimulatorSmokeTest`), so a change that breaks the
+end-to-end flow fails CI, not just the 50K runs. Every bug fixed on day 5 came with a test that failed before the fix.
 
 ## Scaling and what's missing
 
