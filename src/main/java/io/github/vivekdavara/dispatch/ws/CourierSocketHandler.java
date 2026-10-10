@@ -128,8 +128,13 @@ public class CourierSocketHandler extends TextWebSocketHandler {
             previous.close(REPLACED);
         }
         send(session, new CourierMessages.Hello(courierId));
-        assignments.openOfferFor(courierId).ifPresent(a -> send(session, offerMessage(a.id(), a.orderId(),
-                a.distanceMeters(), a.offeredAt())));
+        openOffer(courierId).ifPresent(m -> send(session, m));
+    }
+
+    /** The courier's open offer, if any, as the {@code offer} message: resent on connect, and served over HTTP. */
+    Optional<CourierMessages.OfferMessage> openOffer(UUID courierId) {
+        return assignments.openOfferFor(courierId)
+                .map(a -> offerMessage(a.id(), a.orderId(), a.distanceMeters(), a.offeredAt()));
     }
 
     @Override

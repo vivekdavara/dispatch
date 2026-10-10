@@ -6,10 +6,12 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.jayway.jsonpath.JsonPath;
 import io.github.vivekdavara.dispatch.courier.CourierLocations;
 import io.github.vivekdavara.dispatch.domain.OrderTier;
 import io.github.vivekdavara.dispatch.support.Fixtures;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -128,6 +130,31 @@ class AssignmentApiTest {
     void theCourierIdIsRequired() throws Exception {
         mvc.perform(post("/api/v1/assignments/" + assignment + "/accept")
                 .contentType(MediaType.APPLICATION_JSON).content("{}")).andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void aCourierWithoutASocketFindsTheirOpenOfferOverHttp() throws Exception {
+        mvc.perform(get("/api/v1/couriers/" + courier + "/offer")).andExpect(status().isOk())
+                .andExpect(jsonPath("$.type").value("offer"))
+                .andExpect(jsonPath("$.assignmentId").value(assignment))
+                .andExpect(jsonPath("$.orderId").value(order.toString()))
+                .andExpect(jsonPath("$.tier").value("STANDARD"))
+                .andExpect(jsonPath("$.pickup.lat").value(Fixtures.CENTER.lat()))
+                .andExpect(jsonPath("$.expiresAt").exists());
+        // The answer window is the same one the socket would have shown.
+        String json = mvc.perform(get("/api/v1/couriers/" + courier + "/offer")).andReturn().getResponse()
+                .getContentAsString();
+        Instant offeredAt = Instant.parse(JsonPath.read(json, "$.offeredAt"));
+        Instant expiresAt = Instant.parse(JsonPath.read(json, "$.expiresAt"));
+        assertThat(Duration.between(offeredAt, expiresAt)).isEqualTo(Duration.ofSeconds(30));
+
+        act("decline", courier).andExpect(status().isOk());
+        mvc.perform(get("/api/v1/couriers/" + courier + "/offer")).andExpect(status().isNoContent());
+    }
+
+    @Test
+    void anUnknownCourierHasNoOffer() throws Exception {
+        mvc.perform(get("/api/v1/couriers/" + UUID.randomUUID() + "/offer")).andExpect(status().isNotFound());
     }
 
     @Test

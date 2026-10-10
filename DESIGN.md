@@ -276,7 +276,8 @@ Plain WebSocket with JSON messages (no STOMP/SockJS: four message types don't ne
   `ConcurrentWebSocketSessionDecorator` (a raw session can't be written by two threads at once), with a 5 s send
   limit and a 64 KB buffer so one slow phone can't stall a pass.
 - The HTTP endpoints `POST /api/v1/assignments/{id}/accept|decline` do the same as the socket messages, for
-  clients without a socket.
+  clients without a socket, and `GET /api/v1/couriers/{id}/offer` (v1.0.0) returns the open offer as the same
+  `offer` message (204 if there's none), so such a client can poll for work.
 
 ### Idempotent order creation
 
@@ -336,6 +337,7 @@ Check constraints keep coordinates in range and statuses to the known values.
 | GET | `/api/v1/assignments/{id}` | D3 |
 | POST | `/api/v1/assignments/{id}/accept`, `/decline`, `/pickup`, `/deliver` (body: `courierId`) | D3 |
 | WS | `/ws/couriers/{id}` (offers, accept, decline) | D3 |
+| GET | `/api/v1/couriers/{id}/offer` (the open offer as the socket's `offer` message; 204 if none) | D5 |
 
 ## Failure handling
 
