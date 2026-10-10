@@ -6,12 +6,18 @@ A real-time order/courier matching backend: orders come in, the nearest availabl
 priority rule, the offer is pushed over a WebSocket, and the order is reassigned on decline or timeout.
 Java 21, Spring Boot 3.5, PostgreSQL (Flyway), Redis GEO, WebSockets.
 
-> **Status: in progress (day 4 of 5).** Built and tested: the design, schema and assignment rule (day 1);
-> idempotent order intake, live courier positions in Redis GEO and the assignment engine (day 2); offers pushed
-> over a WebSocket, accept/decline, 30 s offer timeouts with reassignment, pickup and delivery, and an
-> event-driven assignment loop (day 3); a 50K-event load simulator with measured assignment latency before and
-> after one engine optimisation, and handling for courier disconnects and client retries (day 4). See
-> [DESIGN.md](DESIGN.md).
+It's built around the parts of a delivery dispatcher that are easy to get wrong: never giving a courier two orders
+or an order two couriers while engine passes and courier answers race; order intake that survives client retries;
+offers that reach a phone in milliseconds and survive dropped connections; and assignment latency that is measured
+under load, not assumed. A load simulator replays 50,000 events over real HTTP and WebSockets, and the results below
+come from it.
+
+> **Status: v1.0.0, complete.** Design, schema and the assignment rule (day 1); idempotent order intake, courier
+> positions in Redis GEO and the assignment engine (day 2); offers over a WebSocket, accept/decline, 30 s timeouts
+> with reassignment, pickup and delivery, and an event-driven loop (day 3); the load simulator, one measured engine
+> optimisation, and courier disconnects and client retries (day 4); a final review that fixed three bugs and added
+> the HTTP open-offer endpoint, a release check of the numbers, and the docs (day 5). [DESIGN.md](DESIGN.md) is the
+> full design; [WALKTHROUGH.md](WALKTHROUGH.md) has the questions an interviewer would ask, answered from the code.
 
 ## Architecture
 
@@ -33,7 +39,7 @@ flowchart LR
 Postgres is the source of truth; Redis holds only live courier positions. Partial unique indexes in Postgres make
 double assignment impossible even if two engine threads race.
 
-## The assignment rule (built and tested)
+## The assignment rule
 
 - **Which order next:** `priority = tierBonus + minutesWaiting` (PRIORITY = +10 minutes), highest first, so
   standard orders can't starve. Code: [`PriorityScore`](src/main/java/io/github/vivekdavara/dispatch/domain/PriorityScore.java).
@@ -41,7 +47,7 @@ double assignment impossible even if two engine threads race.
   a tie, broken by longest idle time, then courier id. Code:
   [`CourierRanking`](src/main/java/io/github/vivekdavara/dispatch/domain/CourierRanking.java).
 
-## How an order gets a courier (day 2)
+## How an order gets a courier
 
 1. `POST /api/v1/orders` with an `Idempotency-Key`: 201 for a new order, 200 + `Idempotent-Replayed: true` for a
    retry, 409 if the key was used with a different body. Racing retries still create one order
@@ -49,12 +55,13 @@ double assignment impossible even if two engine threads race.
 2. Couriers ping `PUT /api/v1/couriers/{id}/location` every few seconds: `GEOADD` into the zone's GEO set plus a
    60 s `courier:seen` marker, one pipelined round trip, no Postgres.
 3. An engine pass ([`AssignmentEngine`](src/main/java/io/github/vivekdavara/dispatch/assignment/AssignmentEngine.java))
-   reads the zone's free couriers once (since day 4), takes pending orders by priority, finds fresh couriers within
-   5 km with `GEOSEARCH`, keeps the free ones that haven't turned the order down, ranks them, and claims the best
-   one with compare-and-set updates in one transaction; it stops once every free courier has an offer. Eight passes
-   racing on one zone never double-assign (`ConcurrentDispatchTest`).
+   reads the zone's free couriers once, takes pending orders by priority, finds fresh couriers within 5 km with
+   `GEOSEARCH`, keeps the free ones that haven't turned the order down, ranks them, and claims the best one with
+   compare-and-set updates in one transaction; it stops once every free courier has an offer, and reads the next
+   batch of 200 if one went by with couriers still free. Eight passes racing on one zone never double-assign
+   (`ConcurrentDispatchTest`).
 
-## Offers, answers and the loop (day 3)
+### Offers, answers and the loop
 
 4. **Passes run themselves.** Order created, courier online, offer declined or expired, and delivery done each
    publish an event after their change commits; the
@@ -63,7 +70,8 @@ double assignment impossible even if two engine threads race.
    most one pass per zone at a time and coalesces bursts (1,000 orders during a pass cost one more pass) without
    losing a request. A 5 s sweep covers couriers driving into range, since pings don't trigger passes.
 5. **The offer reaches the courier** on `ws://…/ws/couriers/{id}` as an `offer` message with pickup, drop-off,
-   distance and `expiresAt`. A courier who reconnects mid-offer gets it again.
+   distance and `expiresAt`. A courier who reconnects mid-offer gets it again; an app without a socket can poll
+   `GET /api/v1/couriers/{id}/offer` for the same message.
 6. **The courier answers** with `{"type": "accept" | "decline", "assignmentId": …}` (or the same over HTTP).
    [`OfferService`](src/main/java/io/github/vivekdavara/dispatch/assignment/OfferService.java) settles it in one
    transaction where the assignment's `OFFERED →` compare-and-set decides any race between accept, decline and
@@ -71,7 +79,7 @@ double assignment impossible even if two engine threads race.
    courier.
 7. **Pickup and delivery** over HTTP; delivery frees the courier, which triggers the next pass.
 
-## Disconnects and retries (day 4)
+## Failure handling
 
 - **A courier's socket drops.** They have 10 s (`dispatch.sockets.reconnect-grace`) to reconnect, and get their
   open offer resent if they do. If they don't, an offer they hold goes straight to the next courier instead of
@@ -83,6 +91,43 @@ double assignment impossible even if two engine threads race.
   answer back instead of a 409 (the simulator found that one: every retried answer was refused).
 - **Offers carry the claim time.** An offer used to be stamped with the start of the engine pass that made it, so
   a slow pass quietly shortened the courier's 30 s answer window.
+- **A phone that can't keep up** (a send stuck for 5 s, or 64 KB queued behind one) gets its socket closed, which
+  starts its reconnect grace. Before v1.0.0 the exception escaped into whatever was sending: it could end an engine
+  pass early, or turn an answer that had already committed into a 500 (`SlowCourierSocketTest`).
+- **One bad row can't stop expiries.** An offer that can't be expired (its order or courier in a state no code path
+  produces) is logged and skipped; before v1.0.0, being the oldest, it came first in every tick and stopped all
+  expiries (`OfferServiceTest`).
+- **Unservable orders can't block a zone.** A pass read one batch of 200 pending orders; 200 that no free courier
+  could take (all refused, or out of range) hid every order behind them. Passes now read the next batch while free
+  couriers are left (`BacklogPagingTest`).
+- **A courier's socket opens on a reused connection.** Tomcat ends a keep-alive connection after 100 requests by
+  adding `Connection: close` to the 100th response, a 101 upgrade included, and strict clients (the JDK's, OkHttp)
+  refuse a handshake that says both `upgrade` and `close`. The simulator's bots hit it on 3 of 80 reconnects in two
+  50K runs.
+  The limit is now off (`server.tomcat.max-keep-alive-requests: -1`; `KeepAliveUpgradeTest`).
+
+## Design decisions
+
+Each is argued in [DESIGN.md](DESIGN.md) and, as an interview answer, in [WALKTHROUGH.md](WALKTHROUGH.md).
+
+- **Postgres is the source of truth; Redis holds only positions.** Pings are the bulk of the traffic and never touch
+  Postgres; positions are soft state that couriers resend every few seconds, so Redis runs without persistence.
+- **The database makes double assignment impossible.** Partial unique indexes allow one live assignment per order
+  and per courier; every state change is a compare-and-set `UPDATE … WHERE status = ?` under Postgres's default
+  `READ COMMITTED`. No `SELECT … FOR UPDATE`, no `SERIALIZABLE` retry loops: the loser of a race moves on to the
+  next courier.
+- **Greedy nearest-courier, not a global matching.** Minimises pickup time for the order in hand, decides in
+  O(candidates), and is explainable; the 50 m tie band and longest-idle tie-break keep it fair.
+- **Events are hints; the database is the truth.** Passes start from in-process events published after commit, and
+  a 5 s sweep and a 1 s expiry tick read Postgres, so a lost event costs seconds, never an order. No outbox needed.
+- **One pass per zone at a time, coalesced.** A lock-free state machine per zone (`PassScheduler`) turns any burst of
+  requests into at most one extra pass, and never drops one.
+- **One courier snapshot per pass.** Measured: 8× to 20× less engine work, a third off the p99, and strict priority
+  order, which the old pass had been breaking (see Results).
+- **The socket is a delivery channel.** Offers, answers and every other action exist over HTTP too; a dropped socket
+  gets a 10 s grace before its offer goes to the next courier.
+- **Idempotency by key plus canonical request hash**, with `INSERT … ON CONFLICT DO NOTHING` so racing retries
+  never error; courier answers are idempotent too.
 
 ## Run it locally
 
@@ -100,13 +145,15 @@ JAVA_HOME=/opt/homebrew/opt/openjdk@21 mvn test
 JAVA_HOME=/opt/homebrew/opt/openjdk@21 mvn spring-boot:run
 ```
 
+Or build the jar with `mvn package` and run `java -jar target/dispatch.jar`. Then:
+
 ```bash
 curl -s localhost:8101/api/v1/health
 ```
 
 `/api/v1/health` returns 200 with each store's status and round-trip time, or 503 if Postgres or Redis is down.
 To load-test it, `./scripts/simulate.sh <label>` starts its own copy of the app on port 8101 (stop yours first)
-against a fresh `dispatch_sim` database and replays 50,000 events (about 6 minutes; see [Results](#results-day-4)).
+against a fresh `dispatch_sim` database and replays 50,000 events (about 6 minutes; see [Results](#results)).
 Stop Redis with `./scripts/dev-down.sh`.
 
 ### Try it
@@ -155,7 +202,11 @@ and, for a second order left unanswered, `{"type":"offer_closed","assignmentId":
 31.0 s after the order was posted (30 s timeout plus at most one 1 s expiry tick). Those are single hand-run
 observations, not measurements; latency percentiles come from the day-4 simulator.
 
-Without a socket, answer over HTTP (`A` is the `assignmentId`):
+Without a socket, find the open offer over HTTP (the same `offer` message; 204 if there's none) and answer it:
+
+```bash
+A=$(curl -s localhost:8101/api/v1/couriers/$C/offer | python3 -c 'import sys, json; print(json.load(sys.stdin)["assignmentId"])')
+```
 
 ```bash
 curl -s -X POST localhost:8101/api/v1/assignments/$A/accept -H 'Content-Type: application/json' -d "{\"courierId\": \"$C\"}"
@@ -171,7 +222,7 @@ Override with `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DAT
 
 ## Tests
 
-227 tests (`JAVA_HOME=/opt/homebrew/opt/openjdk@21 mvn test`, about a minute, 25 s of it the simulator smoke
+238 tests (`JAVA_HOME=/opt/homebrew/opt/openjdk@21 mvn test`, about a minute, 25 s of it the simulator smoke
 test); everything except the pure-function, scheduler, simulator-unit and mocked-health suites runs against real
 Postgres and Redis. Most tests turn the event loop off (`src/test/resources/config/application.yml`) to drive the
 engine by hand; the loop, socket, end-to-end and simulator suites turn it on in their own context.
@@ -188,18 +239,21 @@ engine by hand; the loop, socket, end-to-end and simulator suites turn it on in 
 | `AssignmentEngineTest` | nearest first, the 50 m idle-time tie-break, stale/offline/busy couriers skipped, 5 km limit, priority vs waiting time |
 | `ConcurrentDispatchTest` | 8 engine passes racing on one zone: every courier and order in at most one offer (5 repetitions) |
 | `ZoneApiTest` | zone upsert and the whole day-2 flow over HTTP |
-| `OfferServiceTest` | accept, decline, expiry; decliners never re-offered that order; accept racing decline and accept racing expiry always have one winner (5 repetitions each); repeated answers are harmless; a disconnect releases the held offer and takes the courier offline in one step |
+| `OfferServiceTest` | accept, decline, expiry; decliners never re-offered that order; accept racing decline and accept racing expiry always have one winner (5 repetitions each); repeated answers are harmless; an offer that can't be expired doesn't hold up the others; a disconnect releases the held offer and takes the courier offline in one step |
 | `OfferTimestampTest` | with a clock that ticks on every read, two offers from one pass carry their own claim times |
 | `CandidateSnapshotTest` | the snapshot pass makes exactly the per-order pass's offers on identical zones from eight seeds; no free courier means no orders examined; the pass stops when free couriers run out |
-| `AssignmentApiTest` | accept → pickup → deliver over HTTP, and the 404/409 cases (deliver before pickup rolls back) |
+| `BacklogPagingTest` | with a batch of 3: orders every free courier refused, or out of their range, don't hide the orders behind them; a pass that can serve nothing reads the backlog once and stops; no next batch once the couriers are taken; priority order holds across batches |
+| `AssignmentApiTest` | accept → pickup → deliver over HTTP, and the 404/409 cases (deliver before pickup rolls back); the open offer over HTTP (the socket's message, then 204 once declined, 404 for an unknown courier) |
 | `PassSchedulerTest` | one pass per zone at a time, zones in parallel, bursts coalesce into one more pass, no request lost, a failing pass doesn't wedge the zone |
 | `DispatchLoopTest` | with the loop on and no manual passes: new order, decline, timeout, courier online, sweep, delivery each lead to an offer |
 | `CourierSocketTest` | real sockets: offer pushed, accept/decline over the wire, a retried accept acked twice, expiry seen on the wire, resend on reconnect, a drop past the grace hands the offer on and takes the courier offline, a reconnect cancels the grace (a second drop gets a full one), a busy courier is left alone, replace (4001), unknown courier (4004), bad messages |
+| `SlowCourierSocketTest` | a socket over its send limits: the engine pass still makes its offers, an answer still succeeds, and the session is closed |
+| `KeepAliveUpgradeTest` | a WebSocket upgrade sent as the 100th request on one keep-alive connection (raw socket) gets a 101 with a single `Connection: upgrade` |
 | `DeliveryFlowTest` | one order from checkout to door through HTTP and the socket only |
 | `LatencySummaryTest`, `ScenarioTest`, `RecorderTest`, `ReportTableTest` | the simulator's percentiles (nearest rank), its seeded scenarios (counts, determinism, zones, rush density, retry and drop shares), the latency join, and the results table |
 | `SimulatorSmokeTest` | the simulator's 1,000-event scenario against the app: every order created once, offered and delivered; retries consistent; drops reconnected; the database agrees |
 
-## Results (day 4)
+## Results
 
 Measured with the load simulator ([DESIGN.md, "Measurement"](DESIGN.md#measurement-d4-the-load-simulator)):
 **50,000 synthetic events** (10,000 orders and 40,000 courier location pings) replayed in real time over 5 minutes
@@ -320,6 +374,26 @@ Two or three runs per configuration, one machine, synthetic load with made-up co
 seconds, not minutes). The latency in both scenarios is mostly queueing for a free courier during the rush, which no
 engine change can remove; the engine's own share is the 3.9 to 4.6 ms server-side p50. The scenarios don't exercise
 multiple app instances, real road distances, or a slow network.
+
+## Limitations
+
+- **No authentication.** Couriers name themselves in request bodies and socket URLs, so any client can act for any
+  courier id; the actuator endpoints are open too.
+- **No cancellation.** `CANCELLED` is in the schema and the state machine, but no endpoint sets it.
+- **No escalation.** An order every courier in range has refused waits for a new one, with no attempt cap; it no
+  longer blocks the orders behind it.
+- **One instance.** Presence (who has a socket open, the reconnect timers) and the one-pass-per-zone rule live in one
+  process. A second instance needs presence in Redis, an owner per zone, and a shared channel for events and pushes
+  (WALKTHROUGH.md, "Scaling").
+- **No socket heartbeats.** A half-open connection looks connected until TCP gives up; offers sent into it expire
+  after 30 s. A courier who delivers over HTTP while their socket is down becomes `AVAILABLE` and is offered work
+  they only see by reconnecting or polling `GET /couriers/{id}/offer`.
+- **Straight-line distance.** Ranking uses haversine distance, not road ETA.
+- **Idempotency keys** never expire and aren't scoped to a caller (there are no callers without auth).
+- **Health is all-or-nothing.** `/api/v1/health` is 503 when Redis is down, although order intake still works;
+  liveness and readiness should be separate.
+- **Measured on one machine**, with synthetic load and made-up courier behaviour; maximum throughput isn't measured
+  (see "Limits of these numbers").
 
 ## License
 

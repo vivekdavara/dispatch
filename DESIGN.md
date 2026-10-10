@@ -288,6 +288,10 @@ Plain WebSocket with JSON messages (no STOMP/SockJS: four message types don't ne
   through the event publish, ending the engine pass or failing an answer that had already committed) and closes
   the session on a virtual thread, because closing a stuck connection can block too. That starts the courier's
   reconnect grace (`SlowCourierSocketTest`).
+- Tomcat's keep-alive request limit is off (`server.tomcat.max-keep-alive-requests: -1`, v1.0.0). With the default
+  of 100, the 100th request on a connection gets `Connection: close` added to its response, a 101 upgrade included,
+  and strict clients refuse a handshake that says both `upgrade` and `close`; a courier app whose HTTP client opened
+  its socket on a reused connection would fail to connect (`KeepAliveUpgradeTest`).
 - The HTTP endpoints `POST /api/v1/assignments/{id}/accept|decline` do the same as the socket messages, for
   clients without a socket, and `GET /api/v1/couriers/{id}/offer` (v1.0.0) returns the open offer as the same
   `offer` message (204 if there's none), so such a client can poll for work.
