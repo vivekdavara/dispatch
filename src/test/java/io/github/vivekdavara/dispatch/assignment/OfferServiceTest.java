@@ -18,6 +18,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -247,6 +248,32 @@ class OfferServiceTest {
         // The bad one was rolled back whole, and is tried again (and logged) on every tick.
         assertThat(f.assignmentStatus(offer.assignmentId())).isEqualTo("OFFERED");
         assertThat(f.courierStatus(courier)).isEqualTo("OFFERED");
+    }
+
+    @Test
+    @Timeout(value = 30, threadMode = Timeout.ThreadMode.SEPARATE_THREAD) // a stuck loop must fail, not hang the build
+    void aFullBatchOfOffersThatCantBeExpiredDoesNotTrapTheTick() {
+        // A whole batch of overdue offers that can't be expired, all older than one that can. Unless they're left out
+        // of the next query, every batch would be the same 500 and the tick would never end (or never reach the
+        // good one): with the exclusion removed, this looped for five minutes until it was killed.
+        for (int i = 0; i < OfferService.EXPIRY_BATCH; i++) {
+            UUID c = f.courier("OFFERED", MINUTE);
+            UUID o = f.order(OrderTier.STANDARD, MINUTE.multipliedBy(10));
+            jdbc.update("UPDATE orders SET status = 'CANCELLED' WHERE id = ?", o);
+            jdbc.update("""
+                    INSERT INTO assignments (order_id, courier_id, status, distance_m, offered_at)
+                    VALUES (?, ?, 'OFFERED', 100, now() - interval '5 minutes')""", o, c);
+        }
+        backdate(offer.assignmentId(), Duration.ofSeconds(40));
+
+        List<Assignment> expired = offers.expireDue();
+
+        assertThat(expired).extracting(Assignment::id).contains(offer.assignmentId());
+        assertThat(f.orderStatus(order)).isEqualTo("PENDING");
+        assertThat(jdbc.queryForObject("""
+                SELECT count(*) FROM assignments a JOIN orders o ON o.id = a.order_id
+                 WHERE o.zone_id = ? AND a.status = 'OFFERED'""", Integer.class, f.zoneId()))
+                .isEqualTo(OfferService.EXPIRY_BATCH);
     }
 
     @Test
