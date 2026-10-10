@@ -4,10 +4,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.net.http.WebSocket;
+import java.net.http.WebSocketHandshakeException;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
@@ -102,13 +104,26 @@ final class CourierBot implements WebSocket.Listener {
         api.connect(courierId, this).whenComplete((s, e) -> {
             if (e != null) {
                 rec.socketErrors.increment();
-                rec.note("courier " + index + " reconnect failed: " + e);
+                rec.note("courier " + index + " reconnect failed: " + describe(e));
                 timers.schedule(this::reconnect, 500, TimeUnit.MILLISECONDS);
             } else {
                 socket = s;
                 rec.reconnects.increment();
             }
         });
+    }
+
+    /**
+     * A failed connect. For a refused handshake, what the server answered and why the client refused it: the JDK
+     * wraps whatever check failed (a bad header, say) as the cause, even when the status was 101.
+     */
+    static String describe(Throwable e) {
+        Throwable cause = e instanceof CompletionException && e.getCause() != null ? e.getCause() : e;
+        if (cause instanceof WebSocketHandshakeException h) {
+            return "handshake answered " + h.getResponse().statusCode() + ", refused by the client: " + h.getCause()
+                    + " " + h.getResponse().headers().map();
+        }
+        return cause.toString();
     }
 
     void close() {
