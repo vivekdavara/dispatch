@@ -357,16 +357,52 @@ is unchanged on average in every pair: 24.83 to 24.88 s before vs 24.87 to 24.97
 The 50 m tie band, the fairness tie-break and the claim logic are untouched; `CandidateSnapshotTest` checks the two
 passes make identical offers whenever nothing changes mid-pass.
 
-### Correctness under load (all ten runs)
+### Release check (v1.0.0)
+
+Day 5 changed the engine (backlog paging, the refused-by-everyone shortcut), the expiry tick, the socket hub and
+Tomcat's configuration, so the default pass was measured again in both scenarios as the fixes landed: `release-*`
+on build `7b702f5` (paging, expiry, the open-offer endpoint), `final-*` on `cd291b3` (plus the slow-socket fix), and
+`v1-*` on `87b2630` (plus the keep-alive fix), whose application code is the v1.0.0 tag's; later commits change only
+docs. Same commands as above, without the flag:
+
+```bash
+./scripts/simulate.sh v1-standard
+```
+
+```bash
+SIM_ARGS="--scenario overload" ./scripts/simulate.sh v1-overload
+```
+
+| Run | First offer p50 | p95 | p99 | max | Server-side p50 | Freed → next offer p50 | Mean pass | Orders examined per pass | Passes | Priority inversions |
+|---|---|---|---|---|---|---|---|---|---|---|
+| release-standard | 6.9 ms | 13.6 s | 16.9 s | 20.4 s | 3.5 ms | 424.5 ms | 2.0 ms | 0.5 | 21,468 | 54 |
+| final-standard | 8.3 ms | 13.6 s | 17.1 s | 20.4 s | 4.2 ms | 442.3 ms | 2.0 ms | 0.5 | 21,453 | 79 |
+| v1-standard | 8.0 ms | 13.6 s | 16.9 s | 18.0 s | 4.2 ms | 421.3 ms | 2.1 ms | 0.5 | 21,427 | 67 |
+| release-overload | 18.3 s | 65.7 s | 72.3 s | 75.5 s | 18.3 s | 7.2 ms | 2.3 ms | 0.6 | 21,400 | 94 |
+| final-overload | 18.4 s | 65.7 s | 72.5 s | 83.3 s | 18.4 s | 7.5 ms | 2.3 ms | 0.5 | 21,414 | 63 |
+| v1-overload | 18.3 s | 65.7 s | 72.4 s | 75.3 s | 18.3 s | 8.1 ms | 2.5 ms | 0.5 | 21,410 | 75 |
+
+They agree with day 4's snapshot-pass runs. Over all of them (5 in standard, 6 in overload, six builds), the
+first-offer p95, p99 and mean are each within 1.4% from lowest to highest, and the overload median within 0.8%; the
+standard median (6.9 to 8.3 ms) and the max (18.0 to 20.4 s, 75.3 to 83.3 s) vary more. PRIORITY orders under
+overload got their first offer in 50.9 to 56.3 ms at the median and 392 to 432 ms at p95 (day 4: 50.5 and 397 ms).
+The paging didn't change these numbers: a pass still looks at 0.5 or 0.6 orders on average, as on day 4.
+
+### Correctness under load (all sixteen runs)
 
 - 10,000 orders created exactly once: 439 orders were POSTed twice with the same key, and all 439 retries got the
   original order back (`retriesConsistent`), with 0 duplicates.
-- 10,000 offered, accepted and delivered; 0 HTTP, socket or delivery errors; 40,000 of 40,000 pings accepted.
-- 518 to 582 answers per run were sent twice (a retry after a lost ack), and 0 were refused.
+- 10,000 offered, accepted and delivered; 0 HTTP or delivery errors; 40,000 of 40,000 pings accepted.
+- 516 to 587 answers per run were sent twice (a retry after a lost ack), and 0 were refused.
 - 40 socket drops, 40 reconnects. The 20 couriers whose socket stayed down past the 10 s grace found themselves
   offline when they came back (`foundOfflineOnReconnect` = 20); none of the 20 short drops cost a courier their
-  status. Assignments ended 10,000 `COMPLETED`, about 1,080 `DECLINED` (the bots decline 10%) and 16 to 20
+  status. Assignments ended 10,000 `COMPLETED`, 1,076 to 1,102 `DECLINED` (the bots decline 10%) and 16 to 20
   `EXPIRED` (offers to couriers whose socket was down: released at the end of the grace, or timed out).
+- **Correction:** the day-4 version of this list said 0 socket errors in all ten runs. Four of them had one each: a
+  refused reconnect handshake, retried 500 ms later. With the release runs that's 7 refusals in 6 of the 14 runs
+  before the keep-alive fix (560 reconnects) and 0 in the 2 runs after it (80). The day-5 runs' notes name the cause
+  (`Connection` multivalued: `[upgrade, close]`, see "Failure handling"); the day-4 notes predate that, but show the
+  same refusal.
 
 ### Limits of these numbers
 
