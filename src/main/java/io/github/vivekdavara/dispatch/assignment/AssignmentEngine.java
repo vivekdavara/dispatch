@@ -78,37 +78,46 @@ public class AssignmentEngine {
     }
 
     /**
-     * The default pass. One query for the zone's AVAILABLE couriers, one for the pending batch with each order's
-     * refusals, then per order only Redis (GEOSEARCH and the freshness MGET); candidates are filtered in memory,
-     * and a claimed courier leaves the snapshot. Two shortcuts follow from the snapshot: with no AVAILABLE courier
-     * the pass ends after its first query, and once every free courier has been claimed it stops instead of
-     * walking the rest of the backlog. The snapshot can go stale during the pass (a courier goes offline, or the
+     * The default pass. One query for the zone's AVAILABLE couriers, one per batch of pending orders with each
+     * order's refusals, then per order only Redis (GEOSEARCH and the freshness MGET); candidates are filtered in
+     * memory, and a claimed courier leaves the snapshot. Two shortcuts follow from the snapshot: with no AVAILABLE
+     * courier the pass ends after its first query, and once every free courier has been claimed it stops instead
+     * of walking the rest of the backlog. The snapshot can go stale during the pass (a courier goes offline, or the
      * manual endpoint runs a pass alongside): that costs a compare-and-set that matches nothing and a fall back
      * down the ranking, never a wrong offer. A courier who becomes free during the pass publishes an event, and
      * the scheduler runs another pass after this one.
+     *
+     * <p>If a whole batch goes by and free couriers are still left (every order in it was refused by them, or is
+     * out of their range), the pass reads the next batch, so orders nobody can take at the front of the queue
+     * can't hide the ones behind them. It ends at the end of the backlog.
      */
     private List<Offer> snapshotPass(String zoneId) {
         Instant now = clock.instant();
         Map<UUID, Instant> available = repo.availableInZone(zoneId);
-        if (available.isEmpty()) {
-            passOrders.record(0);
-            return List.of();
-        }
-        List<AssignmentRepository.PendingOrder> pending = byPriority(repo.pendingWithRefusals(zoneId, pendingBatch),
-                now);
         List<Offer> offers = new ArrayList<>();
         int examined = 0;
-        for (AssignmentRepository.PendingOrder order : pending) {
-            if (available.isEmpty()) {
-                break; // every free courier is taken; the rest of the backlog waits for one to free up
+        UUID after = null;
+        while (!available.isEmpty()) {
+            List<AssignmentRepository.PendingOrder> batch = repo.pendingWithRefusals(zoneId, pendingBatch, after);
+            for (AssignmentRepository.PendingOrder order : byPriority(batch, now)) {
+                if (available.isEmpty()) {
+                    break; // every free courier is taken; the rest of the backlog waits for one to free up
+                }
+                examined++;
+                if (order.refusedBy().containsAll(available.keySet())) {
+                    continue; // every free courier turned this order down: no need to ask Redis
+                }
+                Optional<Offer> offer = offerToBest(zoneId, order, now, courier -> order.refusedBy().contains(courier)
+                        ? null : available.get(courier));
+                offer.ifPresent(o -> {
+                    available.remove(o.courierId());
+                    offers.add(o);
+                });
             }
-            examined++;
-            Optional<Offer> offer = offerToBest(zoneId, order, now, courier -> order.refusedBy().contains(courier)
-                    ? null : available.get(courier));
-            offer.ifPresent(o -> {
-                available.remove(o.courierId());
-                offers.add(o);
-            });
+            if (batch.size() < pendingBatch) {
+                break; // that was the end of the backlog
+            }
+            after = batch.get(batch.size() - 1).id(); // the last in SQL order, where the next batch starts
         }
         passOrders.record(examined);
         return offers;
@@ -117,7 +126,8 @@ public class AssignmentEngine {
     /**
      * The original pass (D2), kept behind {@code dispatch.assignment.candidate-snapshot=false} for the before/after
      * measurement and as the reference the snapshot pass is tested against: for every pending order, Redis for
-     * nearby couriers and then one Postgres query for which of them are AVAILABLE and haven't refused it.
+     * nearby couriers and then one Postgres query for which of them are AVAILABLE and haven't refused it. It is
+     * kept exactly as measured, so it still reads only the first batch.
      */
     private List<Offer> perOrderPass(String zoneId) {
         Instant now = clock.instant();

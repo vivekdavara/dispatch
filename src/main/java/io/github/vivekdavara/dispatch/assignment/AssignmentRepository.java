@@ -7,6 +7,7 @@ import java.sql.Array;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -30,8 +31,10 @@ public class AssignmentRepository {
     }
 
     /** {@code created_at} minus the tier bonus: sorting by it is sorting by priority score (see pendingOrders). */
-    private static final String SERVING_ORDER = " ORDER BY created_at - (CASE WHEN tier = 'PRIORITY' THEN ? ELSE 0"
-            + " END) * interval '1 minute', created_at, id LIMIT ?";
+    private static final String SERVING_AT = "created_at - (CASE WHEN tier = 'PRIORITY' THEN ? ELSE 0 END)"
+            + " * interval '1 minute'";
+
+    private static final String SERVING_ORDER = " ORDER BY " + SERVING_AT + ", created_at, id LIMIT ?";
 
     /** Works in a SELECT from assignments and in an UPDATE's RETURNING; the zone comes from the order. */
     static final String COLUMNS = "id, order_id, courier_id, (SELECT o.zone_id FROM orders o WHERE o.id = order_id)"
@@ -78,22 +81,36 @@ public class AssignmentRepository {
     /**
      * {@link #pendingOrders} plus each order's refusals (the couriers who declined it or let an offer of it
      * expire), in the same query, so a pass can filter candidates without asking Postgres once per order.
+     *
+     * <p>Paged by keyset: with {@code after} null this is the first page; otherwise it's the pending orders that
+     * come after order {@code after} in the serving order. That position is read from the order's own row, so it
+     * still works if the order stopped being pending since the last page was read.
      */
-    public List<PendingOrder> pendingWithRefusals(String zoneId, int limit) {
+    public List<PendingOrder> pendingWithRefusals(String zoneId, int limit, UUID after) {
+        int bonus = OrderTier.PRIORITY.bonusMinutes();
+        List<Object> args = new ArrayList<>();
+        args.add(zoneId);
+        String page = "";
+        if (after != null) {
+            page = " AND (" + SERVING_AT + ", created_at, id) > (SELECT " + SERVING_AT + ", created_at, id"
+                    + " FROM orders prev WHERE prev.id = ?)";
+            args.addAll(List.of(bonus, bonus, after));
+        }
+        args.addAll(List.of(bonus, limit));
         return jdbc.query("""
                         SELECT id, tier, created_at, pickup_lat, pickup_lng,
                                ARRAY(SELECT a.courier_id
                                        FROM assignments a
                                       WHERE a.order_id = orders.id AND a.status IN ('DECLINED', 'EXPIRED')) AS refused
                           FROM orders
-                         WHERE zone_id = ? AND status = 'PENDING'""" + SERVING_ORDER,
+                         WHERE zone_id = ? AND status = 'PENDING'""" + page + SERVING_ORDER,
                 (rs, n) -> new PendingOrder(
                         rs.getObject("id", UUID.class),
                         OrderTier.valueOf(rs.getString("tier")),
                         rs.getTimestamp("created_at").toInstant(),
                         new GeoPoint(rs.getDouble("pickup_lat"), rs.getDouble("pickup_lng")),
                         uuids(rs.getArray("refused"))),
-                zoneId, OrderTier.PRIORITY.bonusMinutes(), limit);
+                args.toArray());
     }
 
     /**
